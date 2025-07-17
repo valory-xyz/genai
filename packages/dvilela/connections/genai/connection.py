@@ -214,7 +214,7 @@ class GenaiConnection(BaseSyncConnection):
                 ),
             )
             self.logger.info(f"LLM response: {response.text}")
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             return {"error": f"Exception while calling Genai:\n{e}"}, True
 
         return {"response": response.text}, False  # type: ignore
