@@ -113,3 +113,9 @@ all-linters:
 push-packages:
 	make clean  && \
 	autonomy push-all
+
+.PHONY: generators
+generators:
+	tox -e abci-docstrings
+	tomte format-copyright --author author_name
+	autonomy packages lock
