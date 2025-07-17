@@ -1,0 +1,8 @@
+{
+    "dev": {
+        "connection/dvilela/genai/0.1.0": "bafybeigupy4w5zkha6igmhuompotmtkk4gn5fn3jaw5oxydvsrrxickodu"
+    },
+    "third_party": {
+        "protocol/valory/srr/0.1.0": "bafybeihrixgptxuqpf2s4nujypwlv5aed2nboozq5kl4c26cxw6r7si2x4"
+    }
+}
