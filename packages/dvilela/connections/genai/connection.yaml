@@ -10,12 +10,16 @@ fingerprint:
   connection.py: bafybeiatyxg7qi6widxzbweiwhs73jarkdnch5dcymf3nibcap3nigofly
   readme.md: bafybeidfgj6cwh6z3jtr5wsss4f6gj37abwtknb5rm2aofyec4vympfzce
 fingerprint_ignore_patterns: []
-connections: []
+connections:
+- valory/x402:0.1.0:bafybeibmnkqy6l6jn7vymjoim46vr3gqyvhxx7sxsnyhxoccctueybd2a4
 protocols:
 - valory/srr:0.1.0:bafybeihrixgptxuqpf2s4nujypwlv5aed2nboozq5kl4c26cxw6r7si2x4
 class_name: GenaiConnection
 config:
   genai_api_key: null
+  use_x402: false
+  genai_x402_server_base_url: http://0.0.0.0:11300
+  network_selector: null
 excluded_protocols: []
 restricted_to_protocols: []
 dependencies:
