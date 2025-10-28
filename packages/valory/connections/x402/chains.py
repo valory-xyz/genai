@@ -1,3 +1,5 @@
+# Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
+
 NETWORK_TO_ID = {
     "base-sepolia": "84532",
     "base": "8453",
