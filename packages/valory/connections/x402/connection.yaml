@@ -1,0 +1,29 @@
+name: x402
+author: valory
+version: 0.1.0
+type: connection
+description: A connection that provides a wrapper around the x402 library.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
+  chains.py: bafybeiapcgoabgzpy4w7s3rcx3axbxubdh4fgkrsont7h465uoagknrv24
+  clients/__init__.py: bafybeicc4twctb3m6g7ygezldputhsxhfjjn4abrj4wttklj4ep5uugxqq
+  clients/base.py: bafybeiecefympozslfmbfbj4ninqg6mzsczabncisnwwcr2bsxfpmdzpje
+  clients/httpx.py: bafybeiba4uglzta5yzz7vzmy2dfqexptiinqg4xaffeqe2vpjreggbm7u4
+  clients/requests.py: bafybeiahiiygsgatzirnf5nlryrhcbbkwxfpd5bihdpdape2wz3oy6edim
+  common.py: bafybeihta5rf6d4vx4ukbcgnqoqvytibh5hajnvicsdrwhaylxelsxtwyq
+  encoding.py: bafybeigkmry5nfq5uqovszjp2kyiv7a3c4s5ptugwrjpbv4c3bdcjztgmq
+  exact.py: bafybeiev6jgmjlmrzhkngclctln23hqi6fr5bniptknjoyfvslyh35fmni
+  networks.py: bafybeig4jqfaawg3hgsf3usnqutelsecnlj2rctgdj6rp6qwig5fp2clse
+  types.py: bafybeids5aslodyanwjuugv4ay5vzolxlny5d44g4dzlaiv5y6rekhlpcu
+fingerprint_ignore_patterns: []
+connections: []
+config: {}
+excluded_protocols: []
+restricted_to_protocols: []
+dependencies: {}
+is_abstract: true
+cert_requests: []
+class_name: x402Client
+protocols: []
