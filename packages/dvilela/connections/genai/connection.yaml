@@ -26,5 +26,9 @@ restricted_to_protocols: []
 dependencies:
   google-generativeai:
     version: ==0.8.2
+  eth-account:
+    version: '>=0.8.0, <0.9.0'
+  pydantic:
+    version: ==2.11.9
 is_abstract: false
 cert_requests: []
