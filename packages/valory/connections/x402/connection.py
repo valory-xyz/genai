@@ -17,4 +17,9 @@
 #
 # ------------------------------------------------------------------------------
 
-"""This module contains the connection packages authored by Valory AG."""
+"""Dummy file just for ci"""
+
+from aea.configurations.base import PublicId
+
+
+PUBLIC_ID = PublicId.from_str("valory/x402:0.1.0")

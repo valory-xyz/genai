@@ -1,3 +1,5 @@
+# Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
+
 from __future__ import annotations
 
 from datetime import datetime

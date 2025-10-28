@@ -7,22 +7,29 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
-  chains.py: bafybeiapcgoabgzpy4w7s3rcx3axbxubdh4fgkrsont7h465uoagknrv24
-  clients/__init__.py: bafybeicc4twctb3m6g7ygezldputhsxhfjjn4abrj4wttklj4ep5uugxqq
-  clients/base.py: bafybeiecefympozslfmbfbj4ninqg6mzsczabncisnwwcr2bsxfpmdzpje
-  clients/httpx.py: bafybeiba4uglzta5yzz7vzmy2dfqexptiinqg4xaffeqe2vpjreggbm7u4
-  clients/requests.py: bafybeiahiiygsgatzirnf5nlryrhcbbkwxfpd5bihdpdape2wz3oy6edim
-  common.py: bafybeihta5rf6d4vx4ukbcgnqoqvytibh5hajnvicsdrwhaylxelsxtwyq
-  encoding.py: bafybeigkmry5nfq5uqovszjp2kyiv7a3c4s5ptugwrjpbv4c3bdcjztgmq
-  exact.py: bafybeiev6jgmjlmrzhkngclctln23hqi6fr5bniptknjoyfvslyh35fmni
-  networks.py: bafybeig4jqfaawg3hgsf3usnqutelsecnlj2rctgdj6rp6qwig5fp2clse
-  types.py: bafybeids5aslodyanwjuugv4ay5vzolxlny5d44g4dzlaiv5y6rekhlpcu
+  chains.py: bafybeiaptpbtqzrurtsqmqvxhzv3ty4sh47w4rqtzbnaxkcuq23yfndk3q
+  clients/__init__.py: bafybeibktgtewg36iuk7etffyg4vtotxnqdrnkdzxds4th2s4tfyrsitdu
+  clients/base.py: bafybeiedp57ga3azv4jzqjgeuqmfkodxodd5qb3mw4qjj2u37u2na7ekju
+  clients/httpx.py: bafybeiax7h6sezkjeycy6dhfrbav3qasbyfgxoewuum62heaucp6lfqine
+  clients/requests.py: bafybeiax2stwyqhdyv5of2pdbbh75hd5xffvocmsucqnew5xaavojfy33i
+  common.py: bafybeihjvl3xtkxzbcyyofur26klrqjbu6gouf6u27ojl7l4qnlcfh6bhe
+  connection.py: bafybeiefcsb7vo3tu3h7hrvelz4ektmgni6za64lkfkbxthex3wmt553bu
+  encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
+  exact.py: bafybeigolvhfvllftn3nowrrdy6rgj5hjxxwz4d25rlcbrmgd6mhdode6q
+  networks.py: bafybeiahso4ceuwcyhs5pmrdbqvdi3s35kng6joxzfyoaqcehfzgi524ru
+  types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
 config: {}
 excluded_protocols: []
 restricted_to_protocols: []
-dependencies: {}
+dependencies:
+  eth-account:
+    version: '>=0.8.0, <0.9.0'
+  requests:
+    version: <2.31.2,>=2.28.1
+  typing-extensions:
+    version: ==4.13.2
 is_abstract: true
 cert_requests: []
 class_name: x402Client
