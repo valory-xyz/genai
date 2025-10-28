@@ -17,4 +17,4 @@
 #
 # ------------------------------------------------------------------------------
 
-"""This module contains the custom packages authored by Valory AG."""
+"""This module contains the connection packages authored by Valory AG."""
