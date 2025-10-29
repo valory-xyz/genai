@@ -201,60 +201,53 @@ class GenaiConnection(BaseSyncConnection):
         session = x402_requests(self._eoa_account)
 
         # Make request
-        try:
-            url = (
-                f"{self.genai_x402_server_base_url}/models/{model_name}:generateContent"
-            )
-            self.logger.info(f"Sending x402-paid request to {url}")
+        url = f"{self.genai_x402_server_base_url}/models/{model_name}:generateContent"
+        self.logger.info(f"Sending x402-paid request to {url}")
 
-            data: Dict = {
-                "contents": [{"parts": [{"text": payload["prompt"]}]}],
+        data: Dict = {
+            "contents": [{"parts": [{"text": payload["prompt"]}]}],
+        }
+
+        if generation_config_kwargs["response_schema"] is not None:
+            schema = pydantic_to_gemini_schema(
+                generation_config_kwargs["response_schema"]
+            )
+            data["generationConfig"] = {
+                "response_mime_type": generation_config_kwargs["response_mime_type"],
+                "response_json_schema": schema,
             }
+        response = session.post(
+            url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
+        )
 
-            if generation_config_kwargs["response_schema"] is not None:
-                schema = pydantic_to_gemini_schema(
-                    generation_config_kwargs["response_schema"]
-                )
-                data["generationConfig"] = {
-                    "responseMimeType": generation_config_kwargs["response_mime_type"],
-                    "responseSchema": schema,
-                }
-            response = session.post(
-                url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
+        result = response.json()
+
+        if "error" in result:
+            raise ValueError(f"Genai API error: {result['error']}")
+
+        # Check for payment response header
+        if "X-Payment-Response" in response.headers:
+            payment_response = decode_x_payment_response(
+                response.headers["X-Payment-Response"]
             )
-
-            result = response.json()
-
-            if "error" in result:
-                raise ValueError(f"Genai API error: {result['error']}")
-
-            # Check for payment response header
-            if "X-Payment-Response" in response.headers:
-                payment_response = decode_x_payment_response(
-                    response.headers["X-Payment-Response"]
-                )
-                self.logger.info(
-                    f"Payment response transaction hash: {payment_response['transaction']}"
-                )
-            else:
-                self.logger.warning("Warning: No payment response header found")
-
-            # Extract text response
-            text = (
-                result.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
+            self.logger.info(
+                f"Payment response transaction hash: {payment_response['transaction']}"
             )
-            if text == "":
-                raise ValueError("Empty response from Genai API")
+        else:
+            self.logger.warning("Warning: No payment response header found")
 
-            self.logger.info(f"Gemini response (x402): {text}")
-            return text, False
-        except Exception as e:  # pylint: disable=broad-except
-            msg = f"Exception while calling Gemini API via x402: {e}"
-            self.logger.error(msg)
-            return msg, True
+        # Extract text response
+        text = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        if text == "":
+            raise ValueError("Empty response from Genai API")
+
+        self.logger.info(f"Gemini response (x402): {text}")
+        return text, False
 
     def _get_response(self, payload: dict) -> Tuple[Dict, bool]:
         """Get response from Genai."""
