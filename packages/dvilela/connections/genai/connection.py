@@ -117,7 +117,6 @@ class GenaiConnection(BaseSyncConnection):
             "genai_x402_server_base_url"
         )
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
-        self.network_selector = self.configuration.config.get("network_selector")
         genai.configure(api_key=genai_api_key)
 
         self.dialogues = SrrDialogues(connection_id=PUBLIC_ID)
@@ -189,6 +188,8 @@ class GenaiConnection(BaseSyncConnection):
     @property
     def _eoa_account(self) -> Account:
         """Get EOA account from private key."""
+        if self.connection_private_key is None:
+            raise ValueError("Connection private key is not set.")
         # pylint: disable=no-value-for-parameter
         return Account.from_key(private_key=self.connection_private_key)
 
