@@ -7,7 +7,7 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibykfwzs46l5mrkoxqwo4toraj5us62666dqdolde5afkiajyfeua
-  connection.py: bafybeig756sfjctywqwpbsq2hp3ugygsjmazrq5jtokshrez2uituuj3cy
+  connection.py: bafybeic5zvwxukuo6xzja5y3dtwczw2cijwuuf27hiccvdhds7sa2vx44a
   readme.md: bafybeidfgj6cwh6z3jtr5wsss4f6gj37abwtknb5rm2aofyec4vympfzce
   utils.py: bafybeig6s2c7tf67nlsou3cay4qpl6bqb6n54t4lyhihejrcdkrcapawx4
 fingerprint_ignore_patterns: []
@@ -20,7 +20,6 @@ config:
   genai_api_key: null
   use_x402: false
   genai_x402_server_base_url: http://0.0.0.0:11300
-  network_selector: null
 excluded_protocols: []
 restricted_to_protocols: []
 dependencies:
