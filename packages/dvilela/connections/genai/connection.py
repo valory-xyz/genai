@@ -30,7 +30,11 @@ from aea.connections.base import BaseSyncConnection
 from aea.mail.base import Envelope
 from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
+from eth_account import Account
 
+from packages.dvilela.connections.genai.utils import pydantic_to_gemini_schema
+from packages.valory.connections.x402.clients.base import decode_x_payment_response
+from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
 from packages.valory.protocols.srr.message import SrrMessage
@@ -42,11 +46,14 @@ DEFAULT_TEMPERATURE = 2.0
 AVAILABLE_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
 ]
 REQUIRED_PROPERTIES_IN_PAYLOAD = ["prompt"]
 DEFAULT_MODEL = "gemini-2.5-flash"
+
+GENERATE_ENDPOINT = "generateContent"
 
 
 class SrrDialogues(BaseSrrDialogues):
@@ -105,6 +112,11 @@ class GenaiConnection(BaseSyncConnection):
         """
         super().__init__(*args, **kwargs)
         genai_api_key = self.configuration.config.get("genai_api_key")
+        self.use_x402 = self.configuration.config.get("use_x402")
+        self.genai_x402_server_base_url = self.configuration.config.get(
+            "genai_x402_server_base_url"
+        )
+        self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
         self.dialogues = SrrDialogues(connection_id=PUBLIC_ID)
@@ -173,6 +185,71 @@ class GenaiConnection(BaseSyncConnection):
 
         self.put_envelope(response_envelope)
 
+    @property
+    def _eoa_account(self) -> Account:
+        """Get EOA account from private key."""
+        if self.connection_private_key is None:
+            raise ValueError("Connection private key is not set.")
+        # pylint: disable=no-value-for-parameter
+        return Account.from_key(private_key=self.connection_private_key)
+
+    def _process_x402_request(
+        self,
+        payload: dict,
+        model_name: str,
+        generation_config_kwargs: dict,
+    ) -> Tuple[str, bool]:
+        session = x402_requests(self._eoa_account)
+
+        # Make request
+        url = f"{self.genai_x402_server_base_url}/models/{model_name}:generateContent"
+        self.logger.info(f"Sending x402-paid request to {url}")
+
+        data: Dict = {
+            "contents": [{"parts": [{"text": payload["prompt"]}]}],
+        }
+
+        if generation_config_kwargs["response_schema"] is not None:
+            schema = pydantic_to_gemini_schema(
+                generation_config_kwargs["response_schema"]
+            )
+            data["generationConfig"] = {
+                "response_mime_type": generation_config_kwargs["response_mime_type"],
+                "response_json_schema": schema,
+            }
+        response = session.post(
+            url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
+        )
+
+        result = response.json()
+
+        if "error" in result:
+            raise ValueError(f"Genai API error: {result['error']}")
+
+        # Check for payment response header
+        if "X-Payment-Response" in response.headers:
+            payment_response = decode_x_payment_response(
+                response.headers["X-Payment-Response"]
+            )
+            self.logger.info(
+                f"Payment response transaction hash: {payment_response['transaction']}"
+            )
+        else:
+            self.logger.warning("Warning: No payment response header found")
+
+        # Extract text response
+        text = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        if text == "":
+            raise ValueError("Empty response from Genai API")
+
+        self.logger.info(f"Gemini response (x402): {text}")
+        return text, False
+
     def _get_response(self, payload: dict) -> Tuple[Dict, bool]:
         """Get response from Genai."""
 
@@ -190,34 +267,43 @@ class GenaiConnection(BaseSyncConnection):
                 "error": f"Model {model_name} is not an available model [{AVAILABLE_MODELS}]"
             }, True
 
-        model = genai.GenerativeModel(model_name)
+        generation_config_kwargs = {
+            "temperature": payload.get("temperature", DEFAULT_TEMPERATURE)
+        }
+
+        if "schema" in payload:
+            schema = payload["schema"]
+            schema_class = pickle.loads(bytes.fromhex(schema["class"]))  # nosec
+            generation_config_kwargs["response_mime_type"] = "application/json"
+            is_list = schema.get("is_list", False)
+            if not is_list:
+                generation_config_kwargs["response_schema"] = schema_class
+            else:
+                generation_config_kwargs["response_schema"] = list[schema_class]  # type: ignore
 
         try:
-            generation_config_kwargs = {
-                "temperature": payload.get("temperature", DEFAULT_TEMPERATURE)
-            }
-
-            if "schema" in payload:
-                schema = payload["schema"]
-                schema_class = pickle.loads(bytes.fromhex(schema["class"]))  # nosec
-                generation_config_kwargs["response_mime_type"] = "application/json"
-                is_list = schema.get("is_list", False)
-                if not is_list:
-                    generation_config_kwargs["response_schema"] = schema_class
-                else:
-                    generation_config_kwargs["response_schema"] = list[schema_class]  # type: ignore
-
-            response = model.generate_content(
-                payload["prompt"],
-                generation_config=genai.types.GenerationConfig(
+            if self.use_x402:
+                self.logger.debug("Using x402 to make the request")
+                response = self._process_x402_request(
+                    payload, model_name, generation_config_kwargs
+                )
+                response_text, error = response
+            else:
+                generation_config = genai.types.GenerationConfig(
                     **generation_config_kwargs,
-                ),
-            )
-            self.logger.info(f"LLM response: {response.text}")
+                )
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    payload["prompt"],
+                    generation_config=generation_config,
+                )
+                response_text = response.text  # type: ignore
+                error = False
         except Exception as e:  # pylint: disable=broad-except
-            return {"error": f"Exception while calling Genai:\n{e}"}, True
+            return {"error": f"Exception while calling Genai: {e}"}, True
 
-        return {"response": response.text}, False  # type: ignore
+        self.logger.info(f"LLM response: {response_text}")
+        return {"response": response_text}, error  # type: ignore
 
     def on_connect(self) -> None:
         """

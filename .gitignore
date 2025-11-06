@@ -2,7 +2,8 @@
 *private_key.txt
 packages/fetchai/
 packages/open_aea/
-packages/valory/
+packages/valory/*
+!packages/valory/connections/
 
 .idea
 **/__pycache__/
