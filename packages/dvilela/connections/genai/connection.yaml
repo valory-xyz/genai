@@ -12,7 +12,7 @@ fingerprint:
   utils.py: bafybeig6s2c7tf67nlsou3cay4qpl6bqb6n54t4lyhihejrcdkrcapawx4
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeif7fjrjtsqdyzxfn3cx4ffcmsnzaz3yhcnylmgbxp5baiy4qgwqwm
+- valory/x402:0.1.0:bafybeigh6rbunb6gst433rnr6d37nfro4gjyyeiktphcuh5j35ecxkffhi
 protocols:
 - valory/srr:0.1.0:bafybeic2a7zy7laa73ieoerrel4kgp55jq7ektiqoay2jwlovmxlnrjtle
 class_name: GenaiConnection
@@ -26,7 +26,7 @@ dependencies:
   google-generativeai:
     version: ==0.8.2
   eth-account:
-    version: '>=0.8.0, <0.9.0'
+    version: '>=0.13.0, <0.14.0'
   pydantic:
     version: ==2.11.9
 is_abstract: false

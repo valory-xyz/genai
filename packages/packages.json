@@ -1,7 +1,7 @@
 {
     "dev": {
-        "connection/valory/x402/0.1.0": "bafybeif7fjrjtsqdyzxfn3cx4ffcmsnzaz3yhcnylmgbxp5baiy4qgwqwm",
-        "connection/dvilela/genai/0.1.0": "bafybeif42dgcucrs7sv5ajme6n7hoa44hbglj47zhbodyqmrtimw2hf5mu"
+        "connection/valory/x402/0.1.0": "bafybeigh6rbunb6gst433rnr6d37nfro4gjyyeiktphcuh5j35ecxkffhi",
+        "connection/dvilela/genai/0.1.0": "bafybeidvthxrtemdd6yyd5xvxl3rrzin5ovtkkphs22a5ojfsnli6jsfy4"
     },
     "third_party": {
         "protocol/valory/srr/0.1.0": "bafybeic2a7zy7laa73ieoerrel4kgp55jq7ektiqoay2jwlovmxlnrjtle"
