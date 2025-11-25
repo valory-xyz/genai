@@ -37,6 +37,8 @@ jobs:
           virtualenvs-in-project: false
           virtualenvs-path: ~/my-custom-path
           installer-parallel: true
+      - name: Preinstall baseconv to bypass PEP517
+        run: poetry run pip install --no-build-isolation python-baseconv==1.2.2
       - name: Check if dependencies can be locked
         run: poetry lock --check
       - name: Poetry install requirements and check they can be locked
