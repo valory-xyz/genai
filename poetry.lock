@@ -222,17 +222,6 @@ files = [
 ]
 
 [[package]]
-name = "async-generator"
-version = "1.10"
-description = "Async generators and context managers for Python 3.5+"
-optional = false
-python-versions = ">=3.5"
-files = [
-    {file = "async_generator-1.10-py3-none-any.whl", hash = "sha256:01c7bf666359b4967d2cda0000cc2e4af16a0ae098cbffcb8472fb9e8ad6585b"},
-    {file = "async_generator-1.10.tar.gz", hash = "sha256:6ebb3d106c12920aaae42ccb6f787ef5eefdcdd166ea3d628fa8476abe712144"},
-]
-
-[[package]]
 name = "async-timeout"
 version = "5.0.1"
 description = "Timeout context manager for asyncio programs"
@@ -267,15 +256,17 @@ files = [
 
 [[package]]
 name = "base58"
-version = "1.0.3"
-description = "Base58 and Base58Check implementation"
+version = "2.1.1"
+description = "Base58 and Base58Check implementation."
 optional = false
-python-versions = "*"
+python-versions = ">=3.5"
 files = [
-    {file = "base58-1.0.3-py2-none-any.whl", hash = "sha256:1e42993c0628ed4f898c03b522b26af78fb05115732549b21a028bc4633d19ab"},
-    {file = "base58-1.0.3-py3-none-any.whl", hash = "sha256:6aa0553e477478993588303c54659d15e3c17ae062508c854a8b752d07c716bd"},
-    {file = "base58-1.0.3.tar.gz", hash = "sha256:9a793c599979c497800eb414c852b80866f28daaed5494703fc129592cc83e60"},
+    {file = "base58-2.1.1-py3-none-any.whl", hash = "sha256:11a36f4d3ce51dfc1043f3218591ac4eb1ceb172919cebe05b52a5bcc8d245c2"},
+    {file = "base58-2.1.1.tar.gz", hash = "sha256:c5d0cb3f5b6e81e8e35da5754388ddcc6d0d14b6c6a132cb93d69ed580a7278c"},
 ]
+
+[package.extras]
+tests = ["PyHamcrest (>=2.0.2)", "mypy", "pytest (>=4.6)", "pytest-benchmark", "pytest-cov", "pytest-flake8"]
 
 [[package]]
 name = "bcrypt"
@@ -1269,26 +1260,6 @@ files = [
 ]
 
 [[package]]
-name = "dnspython"
-version = "2.8.0"
-description = "DNS toolkit"
-optional = false
-python-versions = ">=3.10"
-files = [
-    {file = "dnspython-2.8.0-py3-none-any.whl", hash = "sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af"},
-    {file = "dnspython-2.8.0.tar.gz", hash = "sha256:181d3c6996452cb1189c4046c61599b84a5a86e099562ffde77d26984ff26d0f"},
-]
-
-[package.extras]
-dev = ["black (>=25.1.0)", "coverage (>=7.0)", "flake8 (>=7)", "hypercorn (>=0.17.0)", "mypy (>=1.17)", "pylint (>=3)", "pytest (>=8.4)", "pytest-cov (>=6.2.0)", "quart-trio (>=0.12.0)", "sphinx (>=8.2.0)", "sphinx-rtd-theme (>=3.0.0)", "twine (>=6.1.0)", "wheel (>=0.45.0)"]
-dnssec = ["cryptography (>=45)"]
-doh = ["h2 (>=4.2.0)", "httpcore (>=1.0.0)", "httpx (>=0.28.0)"]
-doq = ["aioquic (>=1.2.0)"]
-idna = ["idna (>=3.10)"]
-trio = ["trio (>=0.30)"]
-wmi = ["wmi (>=1.5.1)"]
-
-[[package]]
 name = "docker"
 version = "7.1.0"
 description = "A Python library for the Docker Engine API."
@@ -2053,29 +2024,6 @@ files = [
 all = ["flake8 (>=7.1.1)", "mypy (>=1.11.2)", "pytest (>=8.3.2)", "ruff (>=0.6.2)"]
 
 [[package]]
-name = "importlib-metadata"
-version = "8.7.0"
-description = "Read metadata from Python packages"
-optional = false
-python-versions = ">=3.9"
-files = [
-    {file = "importlib_metadata-8.7.0-py3-none-any.whl", hash = "sha256:e5dd1551894c77868a30651cef00984d50e1002d06942a7101d34870c5f02afd"},
-    {file = "importlib_metadata-8.7.0.tar.gz", hash = "sha256:d13b81ad223b890aa16c5471f2ac3056cf76c5f10f82d6f9292f0b415f389000"},
-]
-
-[package.dependencies]
-zipp = ">=3.20"
-
-[package.extras]
-check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1)"]
-cover = ["pytest-cov"]
-doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linker (>=1.9)", "sphinx (>=3.5)", "sphinx-lint"]
-enabler = ["pytest-enabler (>=2.2)"]
-perf = ["ipython"]
-test = ["flufl.flake8", "importlib_resources (>=1.3)", "jaraco.test (>=5.4)", "packaging", "pyfakefs", "pytest (>=6,!=8.1.*)", "pytest-perf (>=0.9.2)"]
-type = ["pytest-mypy"]
-
-[[package]]
 name = "iniconfig"
 version = "2.3.0"
 description = "brain-dead simple config-ini parsing"
@@ -2305,31 +2253,20 @@ files = [
 
 [[package]]
 name = "multiaddr"
-version = "0.1.0"
+version = "0.0.9"
 description = "Python implementation of jbenet's multiaddr"
 optional = false
-python-versions = "<4.0,>=3.10"
+python-versions = ">=2.7,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*"
 files = [
-    {file = "multiaddr-0.1.0-py3-none-any.whl", hash = "sha256:6aafac9cac6ece020a706f3cc2c90d590355debeeedaaace2f3705a6543dcd3d"},
-    {file = "multiaddr-0.1.0.tar.gz", hash = "sha256:0a771f380adb3d5089fe386a50bcf30ef6311694d732a58c218d27ff8ba3745c"},
+    {file = "multiaddr-0.0.9-py2.py3-none-any.whl", hash = "sha256:5c0f862cbcf19aada2a899f80ef896ddb2e85614e0c8f04dd287c06c69dac95b"},
+    {file = "multiaddr-0.0.9.tar.gz", hash = "sha256:30b2695189edc3d5b90f1c303abb8f02d963a3a4edf2e7178b975eb417ab0ecf"},
 ]
 
 [package.dependencies]
 base58 = "*"
-dnspython = ">=2.7.0"
-idna = "*"
 netaddr = "*"
-psutil = "*"
-py-cid = ">=0.3.1"
-py-multibase = "*"
-py-multicodec = ">=0.2.0"
-py-multihash = "*"
-trio = ">=0.26.0"
-trio-typing = ">=0.0.4"
+six = "*"
 varint = "*"
-
-[package.extras]
-dev = ["Sphinx (>=5.0.0)", "build (>=0.9.0)", "bump_my_version (>=1.2.0)", "coverage (>=6.5.0)", "mypy", "pre-commit", "pyrefly", "pyright", "pytest", "pytest-cov", "pytest-runner", "pytest-trio (>=0.5.2)", "ruff", "towncrier (>=24,<25)", "tox (>=4.10.0)", "twine", "types-netaddr", "types-psutil", "watchdog (>=3.0.0)", "wheel (>=0.31.0)"]
 
 [[package]]
 name = "multidict"
@@ -2488,17 +2425,6 @@ files = [
 
 [package.dependencies]
 typing-extensions = {version = ">=4.1.0", markers = "python_version < \"3.11\""}
-
-[[package]]
-name = "mypy-extensions"
-version = "1.1.0"
-description = "Type system extensions for programs checked with the mypy type checker."
-optional = false
-python-versions = ">=3.8"
-files = [
-    {file = "mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505"},
-    {file = "mypy_extensions-1.1.0.tar.gz", hash = "sha256:52e68efc3284861e772bbcd66823fde5ae21fd2fdb51c62a211403730b916558"},
-]
 
 [[package]]
 name = "netaddr"
@@ -2722,20 +2648,6 @@ setuptools = "*"
 
 [package.extras]
 requests = ["requests"]
-
-[[package]]
-name = "outcome"
-version = "1.3.0.post0"
-description = "Capture the outcome of Python function calls."
-optional = false
-python-versions = ">=3.7"
-files = [
-    {file = "outcome-1.3.0.post0-py2.py3-none-any.whl", hash = "sha256:e771c5ce06d1415e356078d3bdd68523f284b4ce5419828922b6871e65eda82b"},
-    {file = "outcome-1.3.0.post0.tar.gz", hash = "sha256:9dcf02e65f2971b80047b377468e72a268e15c0af3cf1238e6ff14f7f91143b8"},
-]
-
-[package.dependencies]
-attrs = ">=19.2.0"
 
 [[package]]
 name = "packaging"
@@ -3017,38 +2929,6 @@ files = [
 ]
 
 [[package]]
-name = "psutil"
-version = "7.1.3"
-description = "Cross-platform lib for process and system monitoring."
-optional = false
-python-versions = ">=3.6"
-files = [
-    {file = "psutil-7.1.3-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:0005da714eee687b4b8decd3d6cc7c6db36215c9e74e5ad2264b90c3df7d92dc"},
-    {file = "psutil-7.1.3-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:19644c85dcb987e35eeeaefdc3915d059dac7bd1167cdcdbf27e0ce2df0c08c0"},
-    {file = "psutil-7.1.3-cp313-cp313t-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:95ef04cf2e5ba0ab9eaafc4a11eaae91b44f4ef5541acd2ee91d9108d00d59a7"},
-    {file = "psutil-7.1.3-cp313-cp313t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1068c303be3a72f8e18e412c5b2a8f6d31750fb152f9cb106b54090296c9d251"},
-    {file = "psutil-7.1.3-cp313-cp313t-win_amd64.whl", hash = "sha256:18349c5c24b06ac5612c0428ec2a0331c26443d259e2a0144a9b24b4395b58fa"},
-    {file = "psutil-7.1.3-cp313-cp313t-win_arm64.whl", hash = "sha256:c525ffa774fe4496282fb0b1187725793de3e7c6b29e41562733cae9ada151ee"},
-    {file = "psutil-7.1.3-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:b403da1df4d6d43973dc004d19cee3b848e998ae3154cc8097d139b77156c353"},
-    {file = "psutil-7.1.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:ad81425efc5e75da3f39b3e636293360ad8d0b49bed7df824c79764fb4ba9b8b"},
-    {file = "psutil-7.1.3-cp314-cp314t-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8f33a3702e167783a9213db10ad29650ebf383946e91bc77f28a5eb083496bc9"},
-    {file = "psutil-7.1.3-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:fac9cd332c67f4422504297889da5ab7e05fd11e3c4392140f7370f4208ded1f"},
-    {file = "psutil-7.1.3-cp314-cp314t-win_amd64.whl", hash = "sha256:3792983e23b69843aea49c8f5b8f115572c5ab64c153bada5270086a2123c7e7"},
-    {file = "psutil-7.1.3-cp314-cp314t-win_arm64.whl", hash = "sha256:31d77fcedb7529f27bb3a0472bea9334349f9a04160e8e6e5020f22c59893264"},
-    {file = "psutil-7.1.3-cp36-abi3-macosx_10_9_x86_64.whl", hash = "sha256:2bdbcd0e58ca14996a42adf3621a6244f1bb2e2e528886959c72cf1e326677ab"},
-    {file = "psutil-7.1.3-cp36-abi3-macosx_11_0_arm64.whl", hash = "sha256:bc31fa00f1fbc3c3802141eede66f3a2d51d89716a194bf2cd6fc68310a19880"},
-    {file = "psutil-7.1.3-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3bb428f9f05c1225a558f53e30ccbad9930b11c3fc206836242de1091d3e7dd3"},
-    {file = "psutil-7.1.3-cp36-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:56d974e02ca2c8eb4812c3f76c30e28836fffc311d55d979f1465c1feeb2b68b"},
-    {file = "psutil-7.1.3-cp37-abi3-win_amd64.whl", hash = "sha256:f39c2c19fe824b47484b96f9692932248a54c43799a84282cfe58d05a6449efd"},
-    {file = "psutil-7.1.3-cp37-abi3-win_arm64.whl", hash = "sha256:bd0d69cee829226a761e92f28140bec9a5ee9d5b4fb4b0cc589068dbfff559b1"},
-    {file = "psutil-7.1.3.tar.gz", hash = "sha256:6c86281738d77335af7aec228328e944b30930899ea760ecf33a4dba66be5e74"},
-]
-
-[package.extras]
-dev = ["abi3audit", "black", "check-manifest", "colorama", "coverage", "packaging", "pylint", "pyperf", "pypinfo", "pyreadline", "pytest", "pytest-cov", "pytest-instafail", "pytest-subtests", "pytest-xdist", "pywin32", "requests", "rstcheck", "ruff", "setuptools", "sphinx", "sphinx_rtd_theme", "toml-sort", "twine", "validate-pyproject[all]", "virtualenv", "vulture", "wheel", "wheel", "wmi"]
-test = ["pytest", "pytest-instafail", "pytest-subtests", "pytest-xdist", "pywin32", "setuptools", "wheel", "wmi"]
-
-[[package]]
 name = "py"
 version = "1.11.0"
 description = "library with cross-python path, ini-parsing, io, code, log facilities"
@@ -3058,28 +2938,6 @@ files = [
     {file = "py-1.11.0-py2.py3-none-any.whl", hash = "sha256:607c53218732647dff4acdfcd50cb62615cedf612e72d1724fb1a0cc6405b378"},
     {file = "py-1.11.0.tar.gz", hash = "sha256:51c75c4126074b472f746a24399ad32f6053d1b34b68d2fa41e558e6f4a98719"},
 ]
-
-[[package]]
-name = "py-cid"
-version = "0.3.1"
-description = "Self-describing content-addressed identifiers for distributed systems"
-optional = false
-python-versions = ">=3.10"
-files = [
-    {file = "py_cid-0.3.1-py3-none-any.whl", hash = "sha256:bd60f54372704b7f2c0565432bf052e9ba7d42f260d39e9f7dc9566802a445a6"},
-    {file = "py_cid-0.3.1.tar.gz", hash = "sha256:eb0d14f35430787b978ffb66067d70ffaa9d85ecf62c950e792293193e705a75"},
-]
-
-[package.dependencies]
-base58 = ">=1.0.2,<2.0"
-morphys = ">=1.0,<2.0"
-py-multibase = ">=1.0.0,<2.0.0"
-py-multicodec = "<0.3.0"
-pymultihash = ">=0.8.0,<1.0.0"
-
-[package.extras]
-dev = ["build", "bump_my_version (>=0.19.0)", "codecov (>=2.0.0)", "coverage (>=7.0.0)", "cryptography (>=44.0.1)", "hypothesis (>=6.0.0)", "mypy (>=1.5.0)", "pre-commit (>=3.0.0)", "pyrefly (>=0.17.1,<0.18.0)", "pytest (>=7.0.0)", "pytest-cov (>=4.0.0)", "pytest-runner (>=6.0.0)", "ruff (>=0.1.0)", "sphinx (>=7.0.0)", "towncrier (>=24,<25)", "tox (>=4.0.0)", "twine (>=4.0.0)", "watchdog[watchmedo] (>=3.0.0)", "wheel"]
-docs = ["sphinx (>=7.0.0)"]
 
 [[package]]
 name = "py-ecc"
@@ -3149,23 +3007,6 @@ files = [
 morphys = ">=1.0,<2.0"
 six = ">=1.10.0,<2.0"
 varint = ">=1.0.2,<2.0.0"
-
-[[package]]
-name = "py-multihash"
-version = "2.0.1"
-description = "Multihash implementation in Python"
-optional = false
-python-versions = "*"
-files = [
-    {file = "py-multihash-2.0.1.tar.gz", hash = "sha256:b97511a87b7091f8b37a3d74ccb4a898e133529e7c5e431f9a27f78248a75e60"},
-    {file = "py_multihash-2.0.1-py2.py3-none-any.whl", hash = "sha256:c388728b3456d35cd6668b42a3d9ba32dd640493c8e93b992979668dcf2c0676"},
-]
-
-[package.dependencies]
-base58 = ">=1.0.2,<3.0"
-morphys = ">=1.0,<2.0"
-six = ">=1.10.0,<2.0"
-varint = ">=1.0.2,<2.0"
 
 [[package]]
 name = "pyasn1"
@@ -4211,48 +4052,6 @@ slack = ["slack-sdk"]
 telegram = ["requests"]
 
 [[package]]
-name = "trio"
-version = "0.32.0"
-description = "A friendly Python library for async concurrency and I/O"
-optional = false
-python-versions = ">=3.10"
-files = [
-    {file = "trio-0.32.0-py3-none-any.whl", hash = "sha256:4ab65984ef8370b79a76659ec87aa3a30c5c7c83ff250b4de88c29a8ab6123c5"},
-    {file = "trio-0.32.0.tar.gz", hash = "sha256:150f29ec923bcd51231e1d4c71c7006e65247d68759dd1c19af4ea815a25806b"},
-]
-
-[package.dependencies]
-attrs = ">=23.2.0"
-cffi = {version = ">=1.14", markers = "os_name == \"nt\" and implementation_name != \"pypy\""}
-exceptiongroup = {version = "*", markers = "python_version < \"3.11\""}
-idna = "*"
-outcome = "*"
-sniffio = ">=1.3.0"
-sortedcontainers = "*"
-
-[[package]]
-name = "trio-typing"
-version = "0.10.0"
-description = "Static type checking support for Trio and related projects"
-optional = false
-python-versions = "*"
-files = [
-    {file = "trio-typing-0.10.0.tar.gz", hash = "sha256:065ee684296d52a8ab0e2374666301aec36ee5747ac0e7a61f230250f8907ac3"},
-    {file = "trio_typing-0.10.0-py3-none-any.whl", hash = "sha256:6d0e7ec9d837a2fe03591031a172533fbf4a1a95baf369edebfc51d5a49f0264"},
-]
-
-[package.dependencies]
-async-generator = "*"
-importlib-metadata = "*"
-mypy-extensions = ">=0.4.2"
-packaging = "*"
-trio = ">=0.16.0"
-typing-extensions = ">=3.7.4"
-
-[package.extras]
-mypy = ["mypy (>=1.0)"]
-
-[[package]]
 name = "types-requests"
 version = "2.31.0.6"
 description = "Typing stubs for requests"
@@ -4713,26 +4512,7 @@ idna = ">=2.0"
 multidict = ">=4.0"
 propcache = ">=0.2.1"
 
-[[package]]
-name = "zipp"
-version = "3.23.0"
-description = "Backport of pathlib-compatible object wrapper for zip files"
-optional = false
-python-versions = ">=3.9"
-files = [
-    {file = "zipp-3.23.0-py3-none-any.whl", hash = "sha256:071652d6115ed432f5ce1d34c336c0adfd6a884660d1e9712a256d3d3bd4b14e"},
-    {file = "zipp-3.23.0.tar.gz", hash = "sha256:a07157588a12518c9d4034df3fbbee09c814741a33ff63c05fa29d26a2404166"},
-]
-
-[package.extras]
-check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1)"]
-cover = ["pytest-cov"]
-doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linker (>=1.9)", "sphinx (>=3.5)", "sphinx-lint"]
-enabler = ["pytest-enabler (>=2.2)"]
-test = ["big-O", "jaraco.functools", "jaraco.itertools", "jaraco.test", "more_itertools", "pytest (>=6,!=8.1.*)", "pytest-ignore-flaky"]
-type = ["pytest-mypy"]
-
 [metadata]
 lock-version = "2.0"
 python-versions = "<3.12,>=3.10"
-content-hash = "7afe7b8b298b37c3243e219c63776aff319bd1f9d569feeb0e863fa0805c3c4f"
+content-hash = "9035e540e71e43147b7f9ea859044e6dc073f846a9767d3a8877137aa3184eac"
