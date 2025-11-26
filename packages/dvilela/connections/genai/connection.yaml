@@ -4,7 +4,7 @@ version: 0.1.0
 type: connection
 description: A connection that provides a wrapper around the genai library.
 license: Apache-2.0
-aea_version: '>=1.0.0, <2.0.0'
+aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeibykfwzs46l5mrkoxqwo4toraj5us62666dqdolde5afkiajyfeua
   connection.py: bafybeic5zvwxukuo6xzja5y3dtwczw2cijwuuf27hiccvdhds7sa2vx44a
@@ -12,9 +12,9 @@ fingerprint:
   utils.py: bafybeig6s2c7tf67nlsou3cay4qpl6bqb6n54t4lyhihejrcdkrcapawx4
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeietmhhlmlbjdlbdyqjxmi2z7lw75h54kk2spyfe3ibn25ca5fmwva
+- valory/x402:0.1.0:bafybeibbmbx72zriokyed4rl7us6hjvxoxoqku737eqctsqjcncg3jlnku
 protocols:
-- valory/srr:0.1.0:bafybeihrixgptxuqpf2s4nujypwlv5aed2nboozq5kl4c26cxw6r7si2x4
+- valory/srr:0.1.0:bafybeiee2dgy6r2z5x6vu2ug5vcxvfgg4v3liq2x7v3hxchtp45mwnchg4
 class_name: GenaiConnection
 config:
   genai_api_key: null
@@ -26,7 +26,7 @@ dependencies:
   google-generativeai:
     version: ==0.8.2
   eth-account:
-    version: '>=0.8.0, <0.9.0'
+    version: '>=0.13.0, <0.14.0'
   pydantic:
     version: ==2.11.9
 is_abstract: false

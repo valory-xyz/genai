@@ -4,7 +4,7 @@ version: 0.1.0
 type: connection
 description: A connection that provides a wrapper around the x402 library.
 license: Apache-2.0
-aea_version: '>=1.0.0, <2.0.0'
+aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeiaptpbtqzrurtsqmqvxhzv3ty4sh47w4rqtzbnaxkcuq23yfndk3q
@@ -15,7 +15,7 @@ fingerprint:
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeiefcsb7vo3tu3h7hrvelz4ektmgni6za64lkfkbxthex3wmt553bu
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
-  exact.py: bafybeigolvhfvllftn3nowrrdy6rgj5hjxxwz4d25rlcbrmgd6mhdode6q
+  exact.py: bafybeie4m2bdiuxo4ppnx5lpkqzibcuvx35arthgbrncezg5dyflbxipm4
   networks.py: bafybeiahso4ceuwcyhs5pmrdbqvdi3s35kng6joxzfyoaqcehfzgi524ru
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
@@ -25,7 +25,7 @@ excluded_protocols: []
 restricted_to_protocols: []
 dependencies:
   eth-account:
-    version: '>=0.8.0, <0.9.0'
+    version: '>=0.13.0, <0.14.0'
   requests:
     version: <2.31.2,>=2.28.1
   typing-extensions:

@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict
 
 from eth_account import Account
-from eth_account.messages import encode_structured_data
+from eth_account.messages import encode_typed_data
 from typing_extensions import (  # use `typing_extensions.TypedDict` instead of `typing.TypedDict` on Python < 3.12
     TypedDict,
 )
@@ -100,7 +100,7 @@ def sign_payment_header(
             },
         }
 
-        encoded_message = encode_structured_data(typed_data)
+        encoded_message = encode_typed_data(typed_data)
 
         # Sign it
         signed_message = account.sign_message(encoded_message)
