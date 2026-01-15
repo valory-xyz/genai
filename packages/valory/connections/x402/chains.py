@@ -7,6 +7,7 @@ NETWORK_TO_ID = {
     "avalanche": "43114",
     "optimism": "10",
     "gnosis": "100",
+    "polygon": "137",
 }
 
 
@@ -75,6 +76,15 @@ KNOWN_TOKENS = {
             "human_name": "usdc",
             "address": "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0",
             "name": "Bridged USDC (Gnosis)",
+            "decimals": 6,
+            "version": "2",
+        }
+    ],
+    "137": [
+        {
+            "human_name": "usdc",
+            "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "name": "USD Coin",
             "decimals": 6,
             "version": "2",
         }
