@@ -4,7 +4,13 @@ from typing import Literal
 
 
 SupportedNetworks = Literal[
-    "base", "base-sepolia", "avalanche-fuji", "avalanche", "optimism", "gnosis"
+    "base",
+    "base-sepolia",
+    "avalanche-fuji",
+    "avalanche",
+    "optimism",
+    "gnosis",
+    "polygon",
 ]
 
 EVM_NETWORK_TO_CHAIN_ID = {
@@ -14,4 +20,5 @@ EVM_NETWORK_TO_CHAIN_ID = {
     "avalanche": 43114,
     "optimism": 10,
     "gnosis": 100,
+    "polygon": 137,
 }
