@@ -6,7 +6,6 @@ import time
 from typing import Any, Dict
 
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from typing_extensions import (  # use `typing_extensions.TypedDict` instead of `typing.TypedDict` on Python < 3.12
     TypedDict,
 )
@@ -68,12 +67,6 @@ def sign_payment_header(
 
         typed_data = {
             "types": {
-                "EIP712Domain": [  # <-- required for eth-account validation
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
                 "TransferWithAuthorization": [
                     {"name": "from", "type": "address"},
                     {"name": "to", "type": "address"},
@@ -81,7 +74,7 @@ def sign_payment_header(
                     {"name": "validAfter", "type": "uint256"},
                     {"name": "validBefore", "type": "uint256"},
                     {"name": "nonce", "type": "bytes32"},
-                ],
+                ]
             },
             "primaryType": "TransferWithAuthorization",
             "domain": {
@@ -100,11 +93,11 @@ def sign_payment_header(
             },
         }
 
-        encoded_message = encode_typed_data(typed_data)
-
-        # Sign it
-        signed_message = account.sign_message(encoded_message)
-
+        signed_message = account.sign_typed_data(
+            domain_data=typed_data["domain"],
+            message_types=typed_data["types"],
+            message_data=typed_data["message"],
+        )
         signature = signed_message.signature.hex()
         if not signature.startswith("0x"):
             signature = f"0x{signature}"
