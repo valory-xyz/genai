@@ -7,7 +7,7 @@ license: Apache-2.0
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
-  chains.py: bafybeiaptpbtqzrurtsqmqvxhzv3ty4sh47w4rqtzbnaxkcuq23yfndk3q
+  chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeibktgtewg36iuk7etffyg4vtotxnqdrnkdzxds4th2s4tfyrsitdu
   clients/base.py: bafybeiedp57ga3azv4jzqjgeuqmfkodxodd5qb3mw4qjj2u37u2na7ekju
   clients/httpx.py: bafybeiax7h6sezkjeycy6dhfrbav3qasbyfgxoewuum62heaucp6lfqine
@@ -15,8 +15,8 @@ fingerprint:
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeiefcsb7vo3tu3h7hrvelz4ektmgni6za64lkfkbxthex3wmt553bu
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
-  exact.py: bafybeie4m2bdiuxo4ppnx5lpkqzibcuvx35arthgbrncezg5dyflbxipm4
-  networks.py: bafybeiahso4ceuwcyhs5pmrdbqvdi3s35kng6joxzfyoaqcehfzgi524ru
+  exact.py: bafybeicd3d5iya5o27ekk7qvhnya54o3c3guq74h6v6ttcc4yoht4si7fy
+  networks.py: bafybeicdfpimb6dqp3azeau75zkd5p7b3qwalpuszspvj734uzbvhts3ti
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
