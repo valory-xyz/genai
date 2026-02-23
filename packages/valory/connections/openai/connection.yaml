@@ -4,15 +4,15 @@ version: 0.1.0
 type: connection
 description: The openai connection provides a wrapper around OpenAI SDK.
 license: Apache-2.0
-aea_version: '>=1.0.0, <2.0.0'
+aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
-  __init__.py: bafybeiagnziswj5tll4yzx63u4hvat4yieoaaqt5b67chvvqxg5th5mxz4
-  connection.py: bafybeib3rhiizzi2cyn4oixoqmus237iwkkpzfywqa2fbgajy6qmd6csbm
+  __init__.py: bafybeic4kiss5i4gwa7hilau2yif4ym7jtv26rocipqicaaitumjdgsha4
+  connection.py: bafybeieuhtqt3csihi53jmioksoz3iv6kk2pzswrkpcgynl23bflhwc72u
   readme.md: bafybeibqbvpfn6i2w7vxk2m65gizd2hcofu7mdzp2yusx7uupelztme724
 fingerprint_ignore_patterns: []
 connections: []
 protocols:
-- valory/llm:1.0.0:bafybeihj2orqapokafg7co3wlogwgf6cckaaj2bz3nuv4rm3opkoyhrlp4
+- valory/llm:1.0.0:bafybeiardrklsughnm6tdnc3seqderlnq5nj4xolgnk42crr3kxexjlrfe
 class_name: OpenaiConnection
 config:
   engine: gpt-4
