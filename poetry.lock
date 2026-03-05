@@ -4589,14 +4589,14 @@ files = [
 
 [[package]]
 name = "tomte"
-version = "0.6.0"
+version = "0.6.1"
 description = "A library that wraps many useful tools (linters, analysers, etc) to keep Python code clean, secure, well-documented and optimised."
 optional = false
 python-versions = "<4,>=3.10"
 groups = ["main"]
 files = [
-    {file = "tomte-0.6.0-py3-none-any.whl", hash = "sha256:eafd3bf95611c69ede22e030c14d4c320ede7828a64385b75f5ccd1c7de53d8d"},
-    {file = "tomte-0.6.0.tar.gz", hash = "sha256:76d0d8068713947ef7157e7f816dacb84a5f6feb99c86f0385ed82be12b4f293"},
+    {file = "tomte-0.6.1-py3-none-any.whl", hash = "sha256:3fdd83a7f38bc3a43aa5ce24a2ce84c9a34904cf5887bff06c9cb781024ac59f"},
+    {file = "tomte-0.6.1.tar.gz", hash = "sha256:1e039fd94b1fdd0202c7a4dc01e9324e3786fb2ff18ac5bb6cce142edf9f779e"},
 ]
 
 [package.dependencies]
@@ -5140,4 +5140,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = "<3.15,>=3.10"
-content-hash = "754c3a36237a5c507a6672751e1982c956fdf800f3bc06ae752f667320d6d19a"
+content-hash = "516729906bf62febe71062899cdd03d92b4c119ccf00172b7e1c981e2d528084"
