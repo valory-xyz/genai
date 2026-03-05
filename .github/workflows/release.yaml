@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10"]
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@master
       - uses: actions/setup-python@v3
@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-versions }}
       - uses: addnab/docker-run-action@v3
         with:
-          image: valory/open-autonomy-user:0.21.3
+          image: valory/open-autonomy-user:0.21.12rc4
           options: -v ${{ github.workspace }}:/work
           run: |
             echo "Pushing Packages"
