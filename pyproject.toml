@@ -90,7 +90,7 @@ google-generativeai = "==0.8.2"
 filelock = ">=3.20.1"
 multiaddr = "==0.0.9"
 openai = "==1.93.0"
-pydantic = "==2.11.9"
+pydantic = "^2.11.9"
 typing-extensions = ">=4.13.2"
 
 
