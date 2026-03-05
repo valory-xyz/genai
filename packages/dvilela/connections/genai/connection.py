@@ -39,7 +39,6 @@ from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
 from packages.valory.protocols.srr.message import SrrMessage
 
-
 PUBLIC_ID = PublicId.from_str("dvilela/genai:0.1.0")
 
 DEFAULT_TEMPERATURE = 2.0
