@@ -92,5 +92,5 @@ typing-extensions = ">=4.13.2"
 
 
 [tool.poetry.dependencies.tomte]
-version = "==0.6.0"
+version = "==0.6.1"
 extras = ["cli", "tests"]
