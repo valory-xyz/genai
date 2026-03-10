@@ -14,9 +14,9 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.12"]
-        poetry-version: ["1.8.0"]
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ["3.14"]
+        poetry-version: ["2.0.1"]
 
     defaults:
       run:
@@ -25,8 +25,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install and configure Poetry
@@ -38,7 +38,7 @@ jobs:
           virtualenvs-path: ~/my-custom-path
           installer-parallel: true
       - name: Check if dependencies can be locked
-        run: poetry lock --check
+        run: poetry check --lock
       - name: Poetry install requirements and check they can be locked
         run: poetry install --all-extras --no-interaction -vvv
 
@@ -48,20 +48,20 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.12"]
+        os: [ubuntu-24.04]
+        python-version: ["3.14"]
 
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: pip install tomte[tox,cli]==0.6.1
+        run: pip install tomte[tox,cli]==0.6.2
       - name: Check copyright headers
         run: tomte check-copyright --author valory --exclude-part abci --exclude-part http_client --exclude-part ipfs --exclude-part ledger --exclude-part p2p_libp2p_client --exclude-part gnosis_safe --exclude-part gnosis_safe_proxy_factory --exclude-part multisend --exclude-part service_registry --exclude-part protocols --exclude-part abstract_abci --exclude-part abstract_round_abci --exclude-part registration_abci --exclude-part reset_pause_abci --exclude-part termination_abci --exclude-part transaction_settlement_abci --exclude-part websocket_client --exclude-part contract_subscription --exclude-part mech --exclude-part mech_interact_abci  --exclude-part http_server --exclude-part mech_marketplace --exclude-part erc20 --exclude-part x402
       - name: License compatibility check
@@ -79,19 +79,19 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.12"]
+        os: [ubuntu-24.04]
+        python-version: ["3.14"]
 
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
-          pip install tomte[tox,cli]==0.6.1
+          pip install tomte[tox,cli]==0.6.2
           pip install marshmallow==3.26.1
 
           # Install `mdspell` for spelling checks
@@ -115,9 +115,9 @@ jobs:
 
   scan:
     name: gitleaks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - run: |
@@ -136,16 +136,16 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - uses: actions/setup-go@v5
@@ -153,13 +153,13 @@ jobs:
           go-version: "1.17.7"
       - name: Create decision maker's `store_path` (data folder)
         run: mkdir data
-      - if: matrix.os == 'ubuntu-latest'
+      - if: matrix.os == 'ubuntu-24.04'
         name: Install dependencies (ubuntu-latest)
         run: |
           sudo apt-get update --fix-missing
           sudo apt-get autoremove
           sudo apt-get autoclean
-          pip install tomte[tox]==0.6.1
+          pip install tomte[tox]==0.6.2
           pip install --user --upgrade setuptools
 
           # install Protobuf compiler
@@ -172,15 +172,15 @@ jobs:
           tar -xf tendermint.tar.gz
           sudo mv tendermint /usr/local/bin/tendermint
 
-      - if: matrix.os == 'ubuntu-latest'
+      - if: matrix.os == 'ubuntu-24.04'
         name: Packages unit tests ubuntu-latest
         run: |
           tox -e py${{ matrix.python-version }}-linux
 
-      - if: matrix.os == 'macos-latest'
+      - if: matrix.os == 'macos-15'
         name: Install dependencies (macos-latest)
         run: |
-          pip install tomte[tox]==0.6.1
+          pip install tomte[tox]==0.6.2
           brew install gcc
           # brew install protobuf
           # brew install https://raw.githubusercontent.com/Homebrew/homebrew-core/72457f0166d5619a83f508f2345b22d0617b5021/Formula/protobuf.rb
@@ -190,12 +190,12 @@ jobs:
           brew tap yoheimuta/protolint
           brew install protolint
 
-      - if: matrix.os == 'macos-latest'
+      - if: matrix.os == 'macos-15'
         name: Packages unit tests macos-latest
         run: |
           tox -e py${{ matrix.python-version }}-darwin
 
-      - if: matrix.os == 'windows-latest'
+      - if: matrix.os == 'windows-2025'
         name: Install dependencies (windows-latest)
         env:
           ACTIONS_ALLOW_UNSECURE_COMMANDS: true
@@ -208,14 +208,14 @@ jobs:
           choco install make -y
           # to check make was installed
           make --version
-          pip install tomte[tox]==0.6.1
+          pip install tomte[tox]==0.6.2
 
-      - if: matrix.os == 'windows-latest'
+      - if: matrix.os == 'windows-2025'
         name: Packages unit tests windows-latest
         run: |
           tox -e py${{ matrix.python-version }}-win
 
-      - if: matrix.os == 'ubuntu-latest'
+      - if: matrix.os == 'ubuntu-24.04'
         name: Upload coverage to Codecov
         uses: codecov/codecov-action@v1
         with:
