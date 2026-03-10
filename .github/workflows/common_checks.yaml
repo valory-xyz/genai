@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.12"]
+        python-version: ["3.14"]
         poetry-version: ["2.0.1"]
 
     defaults:
@@ -38,7 +38,7 @@ jobs:
           virtualenvs-path: ~/my-custom-path
           installer-parallel: true
       - name: Check if dependencies can be locked
-        run: poetry lock --no-update
+        run: poetry check --lock
       - name: Poetry install requirements and check they can be locked
         run: poetry install --all-extras --no-interaction -vvv
 
