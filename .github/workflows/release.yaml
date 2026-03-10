@@ -7,14 +7,14 @@ on:
 jobs:
   publish-packages:
     name: Push Packages
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
         python-version: ["3.14"]
     steps:
-      - uses: actions/checkout@master
-      - uses: actions/setup-python@v3
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-versions }}
       - uses: addnab/docker-run-action@v3
