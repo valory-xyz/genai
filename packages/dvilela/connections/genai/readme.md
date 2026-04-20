@@ -8,4 +8,4 @@ The Genai connection provides a wrapper around the Google GenerativeAI library.
 
 ### Changed in this implementation
 - Removed support for models deprecated by Google
-- Removed the artificial delay and left it to the implementors to handle rate limiting
+- Removed the artificial delay and left it to the implementers to handle rate limiting

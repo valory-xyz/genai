@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-versions }}
       - uses: addnab/docker-run-action@v3
         with:
-          image: valory/open-autonomy-user:0.21.16
+          image: valory/open-autonomy-user:0.21.18
           options: -v ${{ github.workspace }}:/work
           run: |
             echo "Pushing Packages"

@@ -4,6 +4,24 @@
 # one word per line, to define a file override use ' - filename'
 # where filename is relative to this configuration file
 uppercase
+genai
+google-generativeai
+AEA
+Autonolas
+CONTRIBUTING
+envs
+Gemini
+Genai
+GenerativeAI
+IPFS
+json
+PR
+pre-PR
+repo
+SDK
+tox
+uv
+x402
 MarketManager
 fulfill
 tomte
