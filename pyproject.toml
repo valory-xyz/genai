@@ -65,7 +65,7 @@ Repository = "https://github.com/valory-xyz/genai"
 
 [dependency-groups]
 dev = [
-    "tomte[tox, cli, tests]>=0.6.5",
+    "tomte[tox, cli, tests]==0.6.5",
 ]
 
 [tool.uv]

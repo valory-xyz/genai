@@ -1488,7 +1488,7 @@ requires-dist = [
 provides-extras = ["all"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "tomte", extras = ["tox", "cli", "tests"], specifier = ">=0.6.5" }]
+dev = [{ name = "tomte", extras = ["tox", "cli", "tests"], specifier = "==0.6.5" }]
 
 [[package]]
 name = "google-ai-generativelanguage"
