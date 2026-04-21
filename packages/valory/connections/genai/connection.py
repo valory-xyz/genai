@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2021-2025 David Vilela Freire
+#   Copyright 2021-2026 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -32,14 +32,14 @@ from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
 from eth_account import Account
 
-from packages.dvilela.connections.genai.utils import pydantic_to_gemini_schema
+from packages.valory.connections.genai.utils import pydantic_to_gemini_schema
 from packages.valory.connections.x402.clients.base import decode_x_payment_response
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
 from packages.valory.protocols.srr.message import SrrMessage
 
-PUBLIC_ID = PublicId.from_str("dvilela/genai:0.1.0")
+PUBLIC_ID = PublicId.from_str("valory/genai:0.1.0")
 
 DEFAULT_TEMPERATURE = 2.0
 AVAILABLE_MODELS = [
