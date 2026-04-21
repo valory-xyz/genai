@@ -6,7 +6,7 @@ LLM and AI connections for [Open Autonomy](https://github.com/valory-xyz/open-au
 
 | Package | Public ID | Description |
 |---|---|---|
-| Connection | `dvilela/genai` | Wrapper around Google's [google-generativeai](https://pypi.org/project/google-generativeai/) SDK (Gemini). Supports optional x402 payment routing. |
+| Connection | `valory/genai` | Wrapper around Google's [google-generativeai](https://pypi.org/project/google-generativeai/) SDK (Gemini). Supports optional x402 payment routing. |
 | Connection | `valory/openai` | Wrapper around the OpenAI SDK (chat completions). |
 | Connection | `valory/x402` | Client for the x402 HTTP payment protocol — used by the `genai` connection when `use_x402=true`. |
 | Protocol | `valory/llm` | LLM request/response protocol (prompt → completion). |

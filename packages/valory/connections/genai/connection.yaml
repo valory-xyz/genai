@@ -1,5 +1,5 @@
 name: genai
-author: dvilela
+author: valory
 version: 0.1.0
 type: connection
 description: A connection that provides a wrapper around the genai library.
@@ -7,7 +7,7 @@ license: Apache-2.0
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeibykfwzs46l5mrkoxqwo4toraj5us62666dqdolde5afkiajyfeua
-  connection.py: bafybeibt5hd4th3wd4zzoa2opygruonh6srvqdnycoclogkofzneugxeuq
+  connection.py: bafybeibk6lly6eqdxfilsyr4ow2434ig63ti26zsswtd4s64b464o2ygta
   readme.md: bafybeie75rbyg3e3gr5uont6auovnsktfbwugafzoy43zpqhvuaotxqlbu
   utils.py: bafybeig6s2c7tf67nlsou3cay4qpl6bqb6n54t4lyhihejrcdkrcapawx4
 fingerprint_ignore_patterns: []
