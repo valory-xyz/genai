@@ -36,6 +36,11 @@ from packages.valory.protocols.llm.message import LlmMessage
 
 PUBLIC_ID = PublicId.from_str("valory/openai:0.1.0")
 
+# Fallback timeout if `request_timeout` is missing from the connection
+# config; the YAML default is 60 but a misconfigured override could leave
+# it unset, and `requests.post(timeout=None)` waits indefinitely.
+DEFAULT_REQUEST_TIMEOUT = 60.0
+
 ENGINES = {
     "chat": ["gpt-3.5-turbo", "gpt-4"],
 }
@@ -135,7 +140,7 @@ class OpenaiConnection(BaseSyncConnection):
                 "temperature",
                 "request_timeout",
                 "use_openai_staging_api",
-                "staging_api",
+                "openai_staging_api",
             )
         }
         self.dialogues = LlmDialogues(connection_id=PUBLIC_ID)
@@ -229,13 +234,17 @@ class OpenaiConnection(BaseSyncConnection):
         )
         engine = self.openai_settings["engine"]
 
+        request_timeout = (
+            self.openai_settings["request_timeout"] or DEFAULT_REQUEST_TIMEOUT
+        )
+
         # Call the staging API
         if self.openai_settings["use_openai_staging_api"]:
             url = self.openai_settings["openai_staging_api"]
-            response = requests.post(  # nosec B113 — timeout is sourced from the connection config (`request_timeout`); bandit's static analysis can't follow the dict lookup.
+            response = requests.post(
                 url,
                 json={"engine": engine, "prompt": formatted_prompt},
-                timeout=self.openai_settings["request_timeout"],
+                timeout=request_timeout,
             )
             return response.json()["text"]
 
@@ -255,10 +264,16 @@ class OpenaiConnection(BaseSyncConnection):
                     temperature=self.openai_settings["temperature"],
                     max_tokens=self.openai_settings["max_tokens"],
                     n=1,
-                    timeout=self.openai_settings["request_timeout"],
+                    timeout=request_timeout,
                     stop=None,
                 )
                 output = response.choices[0].message.content
+                # `ChatCompletionMessage.content` is Optional[str] in openai's
+                # stubs (None for tool-call responses); none of our engines
+                # use tools, so a None reply is a protocol violation we'd
+                # rather surface than silently propagate.
+                if output is None:
+                    raise ValueError("OpenAI returned no message content")
         else:
             raise AttributeError(f"Unrecognized OpenAI engine: {engine}")
 

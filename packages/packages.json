@@ -4,7 +4,7 @@
         "protocol/valory/llm/1.0.0": "bafybeia5vtojmw2mbc2uyukv3lciwm5gdyp4drrh4bkazqs3dlbk3u6hoa",
         "connection/valory/x402/0.1.0": "bafybeihtnlwawysnuvlrsflivrn76gacrcubo7feh656lwcz3leswiywum",
         "connection/valory/genai/0.1.0": "bafybeiaojqgrxeiwzmhqhbhz5evwjljm3chuwey4olt4snwwxwhufpeoum",
-        "connection/valory/openai/0.1.0": "bafybeif25tjm62yfamemm35iuok35fy5dbzkugp23mxrzdwyrz7iehvrhe"
+        "connection/valory/openai/0.1.0": "bafybeie7z4j7oqmeipoyzowy5wbsi36qq4efqtvwbt2d2j44amsjbugyli"
     },
     "third_party": {}
 }

@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
-        python-version: ["3.10"]
+        python-version: ["3.14"]
 
     defaults:
       run:
@@ -46,7 +46,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04]
-        python-version: ["3.10"]
+        python-version: ["3.14"]
 
     timeout-minutes: 30
 
@@ -81,7 +81,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04]
-        python-version: ["3.10"]
+        python-version: ["3.14"]
 
     timeout-minutes: 30
 
