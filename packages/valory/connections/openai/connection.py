@@ -232,7 +232,7 @@ class OpenaiConnection(BaseSyncConnection):
         # Call the staging API
         if self.openai_settings["use_openai_staging_api"]:
             url = self.openai_settings["openai_staging_api"]
-            response = requests.post(
+            response = requests.post(  # nosec B113 — timeout is sourced from the connection config (`request_timeout`); bandit's static analysis can't follow the dict lookup.
                 url,
                 json={"engine": engine, "prompt": formatted_prompt},
                 timeout=self.openai_settings["request_timeout"],
