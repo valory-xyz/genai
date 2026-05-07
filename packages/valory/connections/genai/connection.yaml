@@ -9,12 +9,12 @@ fingerprint:
   __init__.py: bafybeihjhmzjok6icat7mvs7mtfrl5wrjc3dpyurtgzgwbvmcxiyfqolly
   connection.py: bafybeiau2l2whc5rflh7tfuvlbnfqfwl6kxqyqsb2ylji4sbw6je2alvgu
   readme.md: bafybeie75rbyg3e3gr5uont6auovnsktfbwugafzoy43zpqhvuaotxqlbu
-  utils.py: bafybeia4g2525luntgzc325276ulcluv3mvikcgjhkdxxo3rmtcp4jsbwm
+  utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeibg4a4drxliwba6ortn5xvqpgnhf6e5e5ji35gufaeg5jx55yrrci
+- valory/x402:0.1.0:bafybeihtnlwawysnuvlrsflivrn76gacrcubo7feh656lwcz3leswiywum
 protocols:
-- valory/srr:0.1.0:bafybeiee2dgy6r2z5x6vu2ug5vcxvfgg4v3liq2x7v3hxchtp45mwnchg4
+- valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection
 config:
   genai_api_key: null

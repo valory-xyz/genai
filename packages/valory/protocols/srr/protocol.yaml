@@ -8,14 +8,14 @@ license: Apache-2.0
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   README.md: bafybeigpgomi4zaxidw4dop6fd7v32zxtlr2awq666ry7gxj3p6z6e6y5q
-  __init__.py: bafybeiejbejv66uy4atxs6fpyz7q25z6vwnrrcyibcqgnecaji7hak6g6i
-  dialogues.py: bafybeihrr3wvyymzbo4zsqmdeyuubvn6guebfalk2fbb7ipvshes55sqja
-  message.py: bafybeidggh47x7t6xgcdsqvqfx6zpvtxx6ss4flrczy6w2mid2bufa54pq
-  serialization.py: bafybeih4wzj35jhze5egq4mxrd53m6mdz53ofppljcg2tywhvndrlz7sy4
+  __init__.py: bafybeia7laergbjq5gqjbrvpk3mam7pnvyg77av4ypl5pevhp54lorq5cu
+  dialogues.py: bafybeiahgmkj56usqja5jszfpxnh7n3j4lugped7vsplostaemjlsrrszq
+  message.py: bafybeiaazhiuxfnjodmcutw5uaqrb6q33mgjotrrp74alnbnbo3mzwyl64
+  serialization.py: bafybeiexrrspsbmy36rdhsmrtpcjfh2cwqgnbreqar4gkep45todzmjt6y
   srr.proto: bafybeih6as35mfl5jae444qoasknbvdfzkp6irzu6tarhegrx57jncofga
   srr_pb2.py: bafybeigiz3xlb6cbfzynpje7punwoqcraq4gwu5jykylpsq5luqtinjtey
-  tests/test_srr_dialogues.py: bafybeidbh43e7nfedfln55ez34qekszpastzpznip5vrsa3vys4oek6d4a
-  tests/test_srr_messages.py: bafybeibdipm6d4vqqaln4rttp7dgmawkwmqqu75tmdj6l75esxxurrzwp4
+  tests/test_srr_dialogues.py: bafybeidqkvi2nldcs6doot4vjzv45nhdqkheb74doxekymlchsc5avyzk4
+  tests/test_srr_messages.py: bafybeihy4rmrv44fme7e2q4fzph2nodssbxgaqby6nkfgkr5nhxlk5br4m
 fingerprint_ignore_patterns: []
 dependencies:
   protobuf: {}
