@@ -11,12 +11,12 @@ readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
     # OA / open-aea / plugins — pinned exactly (framework contract).
-    "open-autonomy[all]==0.21.19",
-    "open-aea-ledger-ethereum==2.2.1",
-    "open-aea-ledger-cosmos==2.2.1",
-    "open-aea-test-autonomy==0.21.19",
-    "open-aea-cli-ipfs==2.2.1",
-    "open-aea-helpers==0.21.19",
+    "open-autonomy[all]==0.21.20",
+    "open-aea-ledger-ethereum==2.2.3",
+    "open-aea-ledger-cosmos==2.2.3",
+    "open-aea-test-autonomy==0.21.20",
+    "open-aea-cli-ipfs==2.2.3",
+    "open-aea-helpers==0.21.20",
     # Framework/lib deps — ranges (genai is a connection library, not an app).
     "requests>=2.32.5,<3",
     # grpcio: pinned exactly — tight ABI/wheel coupling with protobuf; upstream
@@ -46,12 +46,27 @@ Repository = "https://github.com/valory-xyz/genai"
 
 [dependency-groups]
 dev = [
-    "tomte[tox, cli, tests]==0.6.5",
+    "setuptools>=78.1.1,<82",
+    "tomte[tox, cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
 ]
 
 [tool.uv]
 default-groups = "all"
 prerelease = "allow"
+
+[tool.tomte]
+# No non-PyPI upstream beyond OA/open-aea, which tomte auto-derives
+# from `[project].dependencies`.
+upstream_pins = []
+# x402 connection is adapted from coinbase/x402 and is intentionally
+# kept outside the lint / docstring / type-hint surface — drop it
+# from service_specific_packages so the canonical lint envs don't
+# walk it. Same reason its files are excluded from check-copyright.
+service_specific_packages_exclude = ["packages/valory/connections/x402"]
+# Likewise pytest_targets so the matrix env doesn't try to collect
+# upstream-shape tests inside x402.
+pytest_targets_exclude = ["packages/valory/connections/x402"]
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

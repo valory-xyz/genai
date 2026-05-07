@@ -12,7 +12,6 @@ from packages.valory.connections.x402.clients.requests import (
     x402_requests,
 )
 
-
 __all__ = [
     "x402Client",
     "decode_x_payment_response",

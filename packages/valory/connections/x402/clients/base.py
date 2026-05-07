@@ -15,7 +15,6 @@ from packages.valory.connections.x402.types import (
     UnsupportedSchemeException,
 )
 
-
 # Define type for the payment requirements selector
 PaymentSelectorCallable = Callable[
     [List[PaymentRequirements], Optional[str], Optional[str], Optional[int]],

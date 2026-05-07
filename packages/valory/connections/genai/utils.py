@@ -30,7 +30,7 @@ def pydantic_to_gemini_schema(model: Union[type[BaseModel], type[List[Any]]]) ->
 
     # Handle the simple case — a single Pydantic model
     if isinstance(model, type) and issubclass(model, BaseModel):
-        return model.model_json_schema()
+        return model.model_json_schema()  # type: ignore[union-attr]
 
     # Handle the case where it's a List[PydanticModel]
     origin = get_origin(model)
@@ -43,7 +43,7 @@ def pydantic_to_gemini_schema(model: Union[type[BaseModel], type[List[Any]]]) ->
         if not (isinstance(item_model, type) and issubclass(item_model, BaseModel)):
             raise TypeError(f"Expected List[PydanticModel], got List[{item_model}]")
 
-        schema = item_model.model_json_schema()
+        schema = item_model.model_json_schema()  # type: ignore[attr-defined]
         return {
             "type": "array",
             "items": {k: v for k, v in schema.items() if k != "$defs"},

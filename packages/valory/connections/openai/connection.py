@@ -28,14 +28,18 @@ from aea.connections.base import BaseSyncConnection
 from aea.mail.base import Envelope
 from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
-from openai import AuthenticationError, OpenAI, RateLimitError
+from openai import APIError, AuthenticationError, OpenAI, RateLimitError
 
 from packages.valory.protocols.llm.dialogues import LlmDialogue
 from packages.valory.protocols.llm.dialogues import LlmDialogues as BaseLlmDialogues
 from packages.valory.protocols.llm.message import LlmMessage
 
-
 PUBLIC_ID = PublicId.from_str("valory/openai:0.1.0")
+
+# Fallback timeout if `request_timeout` is missing from the connection
+# config; the YAML default is 60 but a misconfigured override could leave
+# it unset, and `requests.post(timeout=None)` waits indefinitely.
+DEFAULT_REQUEST_TIMEOUT = 60.0
 
 ENGINES = {
     "chat": ["gpt-3.5-turbo", "gpt-4"],
@@ -44,18 +48,28 @@ ENGINES = {
 
 client: Optional[OpenAI] = None
 
+
 class OpenAIClientManager:
     """Client context manager for OpenAI."""
+
     def __init__(self, api_key: str):
+        """Stash the API key for the context-managed client."""
         self.api_key = api_key
 
     def __enter__(self) -> OpenAI:
+        """Lazily instantiate the singleton OpenAI client and return it."""
         global client
         if client is None:
             client = OpenAI(api_key=self.api_key)
         return client
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: Any,
+        exc_value: Any,
+        traceback: Any,
+    ) -> None:
+        """Close the OpenAI client and clear the singleton."""
         global client
         if client is not None:
             client.close()
@@ -126,7 +140,7 @@ class OpenaiConnection(BaseSyncConnection):
                 "temperature",
                 "request_timeout",
                 "use_openai_staging_api",
-                "staging_api"
+                "openai_staging_api",
             )
         }
         self.dialogues = LlmDialogues(connection_id=PUBLIC_ID)
@@ -205,12 +219,24 @@ class OpenaiConnection(BaseSyncConnection):
 
         self.put_envelope(response_envelope)
 
-    def _get_response(self, prompt_template: str, prompt_values: Dict[str, str]):
+    def _get_response(
+        self,
+        prompt_template: str,
+        prompt_values: Dict[str, str],
+    ) -> str:
         """Get response from openai."""
 
         # Format the prompt using input variables and prompt_values
-        formatted_prompt = prompt_template.format(**prompt_values) if prompt_values else prompt_template
+        formatted_prompt = (
+            prompt_template.format(**prompt_values)
+            if prompt_values
+            else prompt_template
+        )
         engine = self.openai_settings["engine"]
+
+        request_timeout = (
+            self.openai_settings["request_timeout"] or DEFAULT_REQUEST_TIMEOUT
+        )
 
         # Call the staging API
         if self.openai_settings["use_openai_staging_api"]:
@@ -218,28 +244,36 @@ class OpenaiConnection(BaseSyncConnection):
             response = requests.post(
                 url,
                 json={"engine": engine, "prompt": formatted_prompt},
-                timeout=self.openai_settings["request_timeout"]
+                timeout=request_timeout,
             )
             return response.json()["text"]
 
         # Call the OpenAI API
         if engine in ENGINES["chat"]:
-            with OpenAIClientManager(self.openai_settings["openai_api_key"]):
+            with OpenAIClientManager(
+                self.openai_settings["openai_api_key"]
+            ) as openai_client:
                 # Call the OpenAI API
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": formatted_prompt},
                 ]
-                response = client.chat.completions.create(
+                response = openai_client.chat.completions.create(
                     model=engine,
                     messages=messages,
                     temperature=self.openai_settings["temperature"],
                     max_tokens=self.openai_settings["max_tokens"],
                     n=1,
-                    timeout=self.openai_settings["request_timeout"],
+                    timeout=request_timeout,
                     stop=None,
                 )
                 output = response.choices[0].message.content
+                # `ChatCompletionMessage.content` is Optional[str] in openai's
+                # stubs (None for tool-call responses); none of our engines
+                # use tools, so a None reply is a protocol violation we'd
+                # rather surface than silently propagate.
+                if output is None:
+                    raise ValueError("OpenAI returned no message content")
         else:
             raise AttributeError(f"Unrecognized OpenAI engine: {engine}")
 
