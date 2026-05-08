@@ -161,9 +161,7 @@ class GenaiConnection(BaseSyncConnection):
             )
             return
 
-        payload, error = self._get_response(
-            payload=json.loads(srr_message.payload),
-        )
+        payload, error = self._get_response(payload=srr_message.payload)
 
         response_message = cast(
             SrrMessage,
@@ -249,8 +247,21 @@ class GenaiConnection(BaseSyncConnection):
         self.logger.info(f"Gemini response (x402): {text}")
         return text, False
 
-    def _get_response(self, payload: dict) -> Tuple[Dict, bool]:
+    def _get_response(self, payload: Any) -> Tuple[Dict, bool]:
         """Get response from Genai."""
+
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                return {"error": f"Failed to decode SRR payload as JSON: {exc}"}, True
+
+        if not isinstance(payload, dict):
+            return {
+                "error": (
+                    f"SRR payload must decode to a JSON object; got {type(payload).__name__}"
+                )
+            }, True
 
         if not all(i in payload for i in REQUIRED_PROPERTIES_IN_PAYLOAD):
             return {
