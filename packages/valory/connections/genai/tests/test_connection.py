@@ -22,10 +22,14 @@
 
 # pylint: disable=protected-access
 
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
+from packages.valory.connections.genai import connection as genai_connection
 from packages.valory.connections.genai.connection import GenaiConnection
 
 
@@ -60,3 +64,53 @@ class TestGetResponsePayloadValidation:
         body, error = GenaiConnection._get_response(stub, '{"foo": "bar"}')
         assert error is True
         assert "missing from the request data" in body["error"]
+
+
+class TestGenerateContentDeadline:
+    """Tests covering the synchronous SDK call's client-side deadline."""
+
+    def test_generate_content_returns_normally_within_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fast SDK reply propagates through ``_get_response`` unchanged."""
+        stub = _make_stub_for_get_response()
+
+        fake_response = SimpleNamespace(text="ok")
+        fake_model = MagicMock()
+        fake_model.generate_content = MagicMock(return_value=fake_response)
+        monkeypatch.setattr(
+            genai_connection.genai,
+            "GenerativeModel",
+            MagicMock(return_value=fake_model),
+        )
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "x"}')
+        assert error is False
+        assert body == {"response": "ok"}
+
+    def test_generate_content_respects_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SDK call slower than the deadline is converted to an error envelope."""
+        stub = _make_stub_for_get_response()
+
+        # Drop the deadline so the slow-path test runs quickly.
+        monkeypatch.setattr(genai_connection, "GENAI_DIRECT_TIMEOUT_SECONDS", 0.05)
+
+        def slow_generate(*_args: Any, **_kwargs: Any) -> Any:
+            time.sleep(1.0)
+            return SimpleNamespace(text="late")
+
+        fake_model = MagicMock()
+        fake_model.generate_content = slow_generate
+        monkeypatch.setattr(
+            genai_connection.genai,
+            "GenerativeModel",
+            MagicMock(return_value=fake_model),
+        )
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "x"}')
+        assert error is True
+        # The outer except wraps the TimeoutError in "Exception while
+        # calling Genai: ..."; the inner message identifies the deadline.
+        assert "deadline" in body["error"]
