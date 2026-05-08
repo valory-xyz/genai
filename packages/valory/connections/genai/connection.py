@@ -20,7 +20,6 @@
 
 """Genai connection."""
 
-import concurrent.futures
 import json
 import pickle  # nosec
 from typing import Any, Dict, Tuple, cast
@@ -55,8 +54,10 @@ DEFAULT_MODEL = "gemini-2.5-flash"
 
 GENERATE_ENDPOINT = "generateContent"
 
-# Cap on the synchronous SDK call so a slow Gemini response cannot hold
-# the connection's single worker thread past this deadline.
+# Forwarded to the SDK as ``request_options.timeout`` so the deadline is
+# enforced inside gRPC where the actual blocking I/O happens. A slow
+# Gemini reply surfaces as ``DeadlineExceeded`` rather than holding the
+# connection's single sync worker thread for the SDK's internal default.
 GENAI_DIRECT_TIMEOUT_SECONDS = 60.0
 
 
@@ -308,18 +309,11 @@ class GenaiConnection(BaseSyncConnection):
                     **generation_config_kwargs,
                 )
                 model = genai.GenerativeModel(model_name)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    future = ex.submit(
-                        model.generate_content,
-                        payload["prompt"],
-                        generation_config=generation_config,
-                    )
-                    try:
-                        response = future.result(timeout=GENAI_DIRECT_TIMEOUT_SECONDS)
-                    except concurrent.futures.TimeoutError as exc:
-                        raise TimeoutError(
-                            f"Gemini call exceeded {GENAI_DIRECT_TIMEOUT_SECONDS}s deadline"
-                        ) from exc
+                response = model.generate_content(
+                    payload["prompt"],
+                    generation_config=generation_config,
+                    request_options={"timeout": GENAI_DIRECT_TIMEOUT_SECONDS},
+                )
                 response_text = response.text  # type: ignore
                 error = False
         except Exception as e:  # pylint: disable=broad-except

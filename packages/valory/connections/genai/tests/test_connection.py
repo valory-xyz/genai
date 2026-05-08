@@ -30,17 +30,20 @@ where it is collected by the test matrix.
 # pylint: disable=protected-access
 
 import datetime
-import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import google.api_core.exceptions
 import pytest
 import requests
 from eth_account import Account
 
 from packages.valory.connections.genai import connection as genai_connection
-from packages.valory.connections.genai.connection import GenaiConnection
+from packages.valory.connections.genai.connection import (
+    GENAI_DIRECT_TIMEOUT_SECONDS,
+    GenaiConnection,
+)
 from packages.valory.connections.x402.clients.requests import (
     DEFAULT_X402_TIMEOUT,
     x402_requests,
@@ -81,17 +84,27 @@ class TestGetResponsePayloadValidation:
 
 
 class TestGenerateContentDeadline:
-    """Tests covering the synchronous SDK call's client-side deadline."""
+    """Tests covering the SDK-level deadline plumbed through ``_get_response``."""
 
-    def test_generate_content_returns_normally_within_deadline(
+    def test_timeout_is_forwarded_to_sdk_request_options(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A fast SDK reply propagates through ``_get_response`` unchanged."""
+        """The deadline reaches the SDK as ``request_options['timeout']``.
+
+        Without this, the deadline is a silent no-op — the SDK falls back
+        to its internal default and the connection's worker thread blocks
+        for that whole window.
+        """
         stub = _make_stub_for_get_response()
 
-        fake_response = SimpleNamespace(text="ok")
+        captured: dict = {}
+
+        def capture(*_args: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return SimpleNamespace(text="ok")
+
         fake_model = MagicMock()
-        fake_model.generate_content = MagicMock(return_value=fake_response)
+        fake_model.generate_content = capture
         monkeypatch.setattr(
             genai_connection.genai,
             "GenerativeModel",
@@ -101,22 +114,24 @@ class TestGenerateContentDeadline:
         body, error = GenaiConnection._get_response(stub, '{"prompt": "x"}')
         assert error is False
         assert body == {"response": "ok"}
+        assert captured["request_options"] == {"timeout": GENAI_DIRECT_TIMEOUT_SECONDS}
 
-    def test_generate_content_respects_deadline(
+    def test_deadline_exceeded_becomes_error_envelope(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A SDK call slower than the deadline is converted to an error envelope."""
+        """A ``DeadlineExceeded`` from the SDK is converted into an error envelope.
+
+        The SDK raises this synchronously at the gRPC layer when the
+        request_options timeout fires, so this test runs in microseconds
+        and exercises the actual production failure path.
+        """
         stub = _make_stub_for_get_response()
 
-        # Drop the deadline so the slow-path test runs quickly.
-        monkeypatch.setattr(genai_connection, "GENAI_DIRECT_TIMEOUT_SECONDS", 0.05)
-
-        def slow_generate(*_args: Any, **_kwargs: Any) -> Any:
-            time.sleep(1.0)
-            return SimpleNamespace(text="late")
+        def raise_deadline(*_args: Any, **_kwargs: Any) -> Any:
+            raise google.api_core.exceptions.DeadlineExceeded("504 Deadline Exceeded")
 
         fake_model = MagicMock()
-        fake_model.generate_content = slow_generate
+        fake_model.generate_content = raise_deadline
         monkeypatch.setattr(
             genai_connection.genai,
             "GenerativeModel",
@@ -125,9 +140,7 @@ class TestGenerateContentDeadline:
 
         body, error = GenaiConnection._get_response(stub, '{"prompt": "x"}')
         assert error is True
-        # The outer except wraps the TimeoutError in "Exception while
-        # calling Genai: ..."; the inner message identifies the deadline.
-        assert "deadline" in body["error"]
+        assert "Deadline Exceeded" in body["error"]
 
 
 def _fake_super_send(_self_inner: object, _request: object, **kwargs: object) -> object:
