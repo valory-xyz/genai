@@ -130,9 +130,7 @@ class TestGenerateContentDeadline:
         assert "deadline" in body["error"]
 
 
-def _fake_super_send(
-    _self_inner: object, _request: object, **kwargs: object
-) -> object:
+def _fake_super_send(_self_inner: object, _request: object, **kwargs: object) -> object:
     """Capture-friendly stand-in for ``HTTPAdapter.send``."""
     response = MagicMock()
     response.status_code = 200

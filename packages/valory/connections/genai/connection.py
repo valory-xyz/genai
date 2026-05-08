@@ -315,9 +315,7 @@ class GenaiConnection(BaseSyncConnection):
                         generation_config=generation_config,
                     )
                     try:
-                        response = future.result(
-                            timeout=GENAI_DIRECT_TIMEOUT_SECONDS
-                        )
+                        response = future.result(timeout=GENAI_DIRECT_TIMEOUT_SECONDS)
                     except concurrent.futures.TimeoutError as exc:
                         raise TimeoutError(
                             f"Gemini call exceeded {GENAI_DIRECT_TIMEOUT_SECONDS}s deadline"
