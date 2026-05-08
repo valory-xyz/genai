@@ -2,7 +2,7 @@
 
 import copy
 import json
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import requests
 from eth_account import Account
@@ -16,22 +16,41 @@ from packages.valory.connections.x402.clients.base import (
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
 
 
+# (connect, read) seconds. Read is generous enough for image-bearing LLM
+# prompts; connect matches the rest of the codebase.
+DEFAULT_X402_TIMEOUT: Tuple[float, float] = (10.0, 60.0)
+
+
 class x402HTTPAdapter(HTTPAdapter):
     """HTTP adapter for handling x402 payment required responses."""
 
-    def __init__(self, client: x402Client, **kwargs):
+    def __init__(
+        self,
+        client: x402Client,
+        default_timeout: Union[float, Tuple[float, float]] = DEFAULT_X402_TIMEOUT,
+        **kwargs,
+    ):
         """Initialize the adapter with an x402Client.
 
         Args:
             client: x402Client instance for handling payments
+            default_timeout: timeout applied when the caller did not pass one.
+                A single float covers connect and read; a tuple is (connect, read).
             **kwargs: Additional arguments to pass to HTTPAdapter
         """
         super().__init__(**kwargs)
         self.client = client
         self._is_retry = False
+        self._default_timeout = default_timeout
 
     def send(self, request, **kwargs):
         """Send a request with payment handling for 402 responses.
+
+        ``Session.request`` always populates ``kwargs['timeout']`` before
+        calling the adapter, with ``None`` when the caller did not pass
+        one. Overwrite that ``None`` with the adapter's default so a hung
+        upstream cannot block the single sync-connection worker thread
+        forever.
 
         Args:
             request: The PreparedRequest being sent
@@ -40,6 +59,9 @@ class x402HTTPAdapter(HTTPAdapter):
         Returns:
             Response object
         """
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self._default_timeout
+
         if self._is_retry:
             self._is_retry = False
             return super().send(request, **kwargs)
@@ -92,6 +114,7 @@ def x402_http_adapter(
     account: Account,
     max_value: Optional[int] = None,
     payment_requirements_selector: Optional[PaymentSelectorCallable] = None,
+    default_timeout: Union[float, Tuple[float, float]] = DEFAULT_X402_TIMEOUT,
     **kwargs,
 ) -> x402HTTPAdapter:
     """Create an HTTP adapter that handles 402 Payment Required responses.
@@ -102,6 +125,8 @@ def x402_http_adapter(
         payment_requirements_selector: Optional custom selector for payment requirements.
             Should be a callable that takes (accepts, network_filter, scheme_filter, max_value)
             and returns a PaymentRequirements object.
+        default_timeout: timeout applied when the caller did not pass one.
+            A single float covers connect and read; a tuple is (connect, read).
         **kwargs: Additional arguments to pass to HTTPAdapter
 
     Returns:
@@ -112,13 +137,14 @@ def x402_http_adapter(
         max_value=max_value,
         payment_requirements_selector=payment_requirements_selector,
     )
-    return x402HTTPAdapter(client, **kwargs)
+    return x402HTTPAdapter(client, default_timeout=default_timeout, **kwargs)
 
 
 def x402_requests(
     account: Account,
     max_value: Optional[int] = None,
     payment_requirements_selector: Optional[PaymentSelectorCallable] = None,
+    default_timeout: Union[float, Tuple[float, float]] = DEFAULT_X402_TIMEOUT,
     **kwargs,
 ) -> requests.Session:
     """Create a requests session with x402 payment handling.
@@ -129,6 +155,8 @@ def x402_requests(
         payment_requirements_selector: Optional custom selector for payment requirements.
             Should be a callable that takes (accepts, network_filter, scheme_filter, max_value)
             and returns a PaymentRequirements object.
+        default_timeout: timeout applied when the caller did not pass one.
+            A single float covers connect and read; a tuple is (connect, read).
         **kwargs: Additional arguments to pass to HTTPAdapter
 
     Returns:
@@ -139,6 +167,7 @@ def x402_requests(
         account,
         max_value=max_value,
         payment_requirements_selector=payment_requirements_selector,
+        default_timeout=default_timeout,
         **kwargs,
     )
 
