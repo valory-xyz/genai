@@ -18,19 +18,33 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Tests for the Genai connection."""
+"""Tests for the Genai connection.
+
+The default-timeout test for x402 also lives in this file because the
+upstream-shape ``packages/valory/connections/x402`` directory is excluded
+from this repo's pytest collection (see ``[tool.tomte] pytest_targets_exclude``
+in pyproject.toml). The Valory-specific timeout injection is asserted here
+where it is collected by the test matrix.
+"""
 
 # pylint: disable=protected-access
 
+import datetime
 import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+from eth_account import Account
 
 from packages.valory.connections.genai import connection as genai_connection
 from packages.valory.connections.genai.connection import GenaiConnection
+from packages.valory.connections.x402.clients.requests import (
+    DEFAULT_X402_TIMEOUT,
+    x402_requests,
+)
 
 
 def _make_stub_for_get_response(use_x402: bool = False) -> Any:
@@ -114,3 +128,70 @@ class TestGenerateContentDeadline:
         # The outer except wraps the TimeoutError in "Exception while
         # calling Genai: ..."; the inner message identifies the deadline.
         assert "deadline" in body["error"]
+
+
+def _fake_super_send(
+    _self_inner: object, _request: object, **kwargs: object
+) -> object:
+    """Capture-friendly stand-in for ``HTTPAdapter.send``."""
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = {}
+    response.cookies = {}
+    response.is_redirect = False
+    response.is_permanent_redirect = False
+    response.history = []
+    response.url = "http://example.com/"
+    response.elapsed = datetime.timedelta(seconds=0)
+    response._captured = kwargs  # exposed for the test to read back
+    return response
+
+
+class TestX402DefaultTimeout:
+    """Tests covering the default timeout injection on the x402 adapter."""
+
+    def test_default_timeout_is_injected_when_caller_omits(self) -> None:
+        """``Session.request`` without a timeout reaches the adapter as the default."""
+        session = x402_requests(Account.create())
+        captured: dict = {}
+
+        def capturing_send(
+            _self_inner: object, request: object, **kwargs: object
+        ) -> object:
+            captured.update(kwargs)
+            return _fake_super_send(_self_inner, request, **kwargs)
+
+        with patch.object(
+            requests.adapters.HTTPAdapter,
+            "send",
+            autospec=True,
+            side_effect=capturing_send,
+        ):
+            session.request("GET", "http://example.com/")
+        assert captured["timeout"] == DEFAULT_X402_TIMEOUT
+
+    def test_explicit_caller_timeout_is_preserved(self) -> None:
+        """An explicit caller timeout flows through to the adapter unchanged."""
+        session = x402_requests(Account.create())
+        captured: dict = {}
+
+        def capturing_send(
+            _self_inner: object, request: object, **kwargs: object
+        ) -> object:
+            captured.update(kwargs)
+            return _fake_super_send(_self_inner, request, **kwargs)
+
+        with patch.object(
+            requests.adapters.HTTPAdapter,
+            "send",
+            autospec=True,
+            side_effect=capturing_send,
+        ):
+            session.request("GET", "http://example.com/", timeout=5)
+        assert captured["timeout"] == 5
+
+    def test_custom_default_timeout_propagates(self) -> None:
+        """A caller-provided ``default_timeout`` is mounted on the adapter."""
+        session = x402_requests(Account.create(), default_timeout=(2.0, 7.0))
+        adapter = session.get_adapter("http://example.com/")
+        assert adapter._default_timeout == (2.0, 7.0)
