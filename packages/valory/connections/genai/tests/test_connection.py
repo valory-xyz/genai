@@ -94,6 +94,8 @@ class TestGenerateContentDeadline:
         Without this, the deadline is a silent no-op — the SDK falls back
         to its internal default and the connection's worker thread blocks
         for that whole window.
+
+        :param monkeypatch: pytest fixture used to swap ``GenerativeModel``.
         """
         stub = _make_stub_for_get_response()
 
@@ -124,6 +126,8 @@ class TestGenerateContentDeadline:
         The SDK raises this synchronously at the gRPC layer when the
         request_options timeout fires, so this test runs in microseconds
         and exercises the actual production failure path.
+
+        :param monkeypatch: pytest fixture used to swap ``GenerativeModel``.
         """
         stub = _make_stub_for_get_response()
 
