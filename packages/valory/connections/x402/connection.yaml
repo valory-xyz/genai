@@ -17,6 +17,8 @@ fingerprint:
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
   exact.py: bafybeicd3d5iya5o27ekk7qvhnya54o3c3guq74h6v6ttcc4yoht4si7fy
   networks.py: bafybeieo34m7hjcbsjx4lhbtjjpqx3lg7m2crm2mnlcdn2tfttygxrdzsa
+  tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
+  tests/test_clients.py: bafybeif2popipcfm6jo7ktfkcifbdzawchmn5sajfpidkceiv6ep2azcbm
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
