@@ -1,9 +1,10 @@
 # Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
 
-from typing import Dict, List, Optional
+import logging
+from typing import Dict, List, Optional, Tuple, Union
 
 from eth_account import Account
-from httpx import AsyncClient, Request, Response
+from httpx import AsyncClient, Request, Response, Timeout
 
 from packages.valory.connections.x402.clients.base import (
     MissingRequestConfigError,
@@ -14,10 +15,35 @@ from packages.valory.connections.x402.clients.base import (
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
 
 
+_logger = logging.getLogger(__name__)
+
+
+# (connect, read) seconds. Mirrors the requests adapter's default so a hung
+# upstream cannot block the retry call indefinitely.
+DEFAULT_X402_HTTPX_TIMEOUT: Tuple[float, float] = (10.0, 60.0)
+
+HttpxTimeout = Union[float, Tuple[float, float], Timeout, None]
+
+
+def _coerce_httpx_timeout(value: HttpxTimeout) -> Timeout:
+    """Convert (connect, read) tuples to an httpx Timeout instance."""
+    if isinstance(value, Timeout):
+        return value
+    if isinstance(value, tuple):
+        connect, read = value
+        return Timeout(connect=connect, read=read, write=read, pool=connect)
+    return Timeout(value)
+
+
 class HttpxHooks:
-    def __init__(self, client: x402Client):
+    def __init__(
+        self,
+        client: x402Client,
+        retry_timeout: HttpxTimeout = DEFAULT_X402_HTTPX_TIMEOUT,
+    ):
         self.client = client
         self._is_retry = False
+        self._retry_timeout = _coerce_httpx_timeout(retry_timeout)
 
     async def on_request(self, request: Request):
         """Handle request before it is sent."""
@@ -62,9 +88,25 @@ class HttpxHooks:
             request.headers["X-Payment"] = payment_header
             request.headers["Access-Control-Expose-Headers"] = "X-Payment-Response"
 
-            # Retry the request
-            async with AsyncClient() as client:
+            # Retry the request. The fresh AsyncClient does not inherit the
+            # caller's timeout, so apply the adapter's configured value
+            # explicitly — without it, the retry uses httpx's default which
+            # may not match the caller's expectations and can hang on some
+            # httpx versions.
+            async with AsyncClient(timeout=self._retry_timeout) as client:
                 retry_response = await client.send(request)
+
+                if retry_response.status_code == 402:
+                    _logger.warning(
+                        "x402 retry returned 402 after payment header was attached; "
+                        "upstream still rejects the request."
+                    )
+                    response.headers = retry_response.headers
+                    response._content = retry_response._content
+                    response.status_code = retry_response.status_code
+                    raise PaymentError(
+                        "upstream returned 402 after payment was accepted"
+                    )
 
                 # Copy the retry response data to the original response
                 response.status_code = retry_response.status_code
@@ -84,6 +126,7 @@ def x402_payment_hooks(
     account: Account,
     max_value: Optional[int] = None,
     payment_requirements_selector: Optional[PaymentSelectorCallable] = None,
+    retry_timeout: HttpxTimeout = DEFAULT_X402_HTTPX_TIMEOUT,
 ) -> Dict[str, List]:
     """Create httpx event hooks dictionary for handling 402 Payment Required responses.
 
@@ -93,6 +136,9 @@ def x402_payment_hooks(
         payment_requirements_selector: Optional custom selector for payment requirements.
             Should be a callable that takes (accepts, network_filter, scheme_filter, max_value)
             and returns a PaymentRequirements object.
+        retry_timeout: Timeout applied to the fresh AsyncClient used for the
+            post-payment retry. Accepts a float, a (connect, read) tuple, or
+            an httpx.Timeout instance.
 
     Returns:
         Dictionary of event hooks that can be directly assigned to client.event_hooks
@@ -105,7 +151,7 @@ def x402_payment_hooks(
     )
 
     # Create hooks
-    hooks = HttpxHooks(client)
+    hooks = HttpxHooks(client, retry_timeout=retry_timeout)
 
     # Return event hooks dictionary
     return {
@@ -122,6 +168,7 @@ class x402HttpxClient(AsyncClient):
         account: Account,
         max_value: Optional[int] = None,
         payment_requirements_selector: Optional[PaymentSelectorCallable] = None,
+        retry_timeout: HttpxTimeout = DEFAULT_X402_HTTPX_TIMEOUT,
         **kwargs,
     ):
         """Initialize an AsyncClient with x402 payment handling.
@@ -132,9 +179,14 @@ class x402HttpxClient(AsyncClient):
             payment_requirements_selector: Optional custom selector for payment requirements.
                 Should be a callable that takes (accepts, network_filter, scheme_filter, max_value)
                 and returns a PaymentRequirements object.
+            retry_timeout: Timeout applied to the post-payment retry's
+                AsyncClient. Defaults to ``DEFAULT_X402_HTTPX_TIMEOUT``.
             **kwargs: Additional arguments to pass to AsyncClient
         """
         super().__init__(**kwargs)
         self.event_hooks = x402_payment_hooks(
-            account, max_value, payment_requirements_selector
+            account,
+            max_value,
+            payment_requirements_selector,
+            retry_timeout=retry_timeout,
         )
