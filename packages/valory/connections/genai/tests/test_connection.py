@@ -35,7 +35,7 @@ import datetime
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import google.api_core.exceptions
 import httpx
@@ -376,16 +376,15 @@ class TestProcessX402RequestPaymentResponseHeader:
             lambda *a, **k: GenaiConnection._process_x402_request(stub, *a, **k)
         )
 
-        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
+        body, error = GenaiConnection._get_response(
+            stub, '{"prompt": "hi", "temperature": 0.5}'
+        )
         assert error is False
         assert body == {"response": gemini_text}
 
-        # The request body must omit generationConfig when no schema is
-        # supplied — otherwise the server gets an empty schema and may
-        # reject the call.
         sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
-        assert "generationConfig" not in sent_data
         assert sent_data["contents"] == [{"parts": [{"text": "hi"}]}]
+        assert sent_data["generationConfig"] == {"temperature": 0.5}
 
     def test_schema_without_mime_type_defaults_to_json(
         self, monkeypatch: pytest.MonkeyPatch
@@ -572,13 +571,8 @@ class TestX402RequestsSecondary402:
         retry = MagicMock()
         retry.status_code = 402
         retry.headers = {}
-        retry.content = b'{"x402Version": 1, "accepts": []}'
+        retry.content = b'{"x402Version": 1, "accepts": [], "error": "price changed"}'
 
-        # Counter-based dispatch in a stub is the anti-pattern flagged in
-        # ~/.claude/rules/valory-test-integrity.md ("Avoid counter-based
-        # dispatch in stubs"). Use side_effect with an ordered list so the
-        # two distinct adapter.send calls (first 402 → payment → retry 402)
-        # come from separate mock entries, not from a shared counter.
         send_mock = MagicMock(side_effect=[first, retry])
 
         def super_send(_self: object, _request: object, **kwargs: object) -> Any:
@@ -592,10 +586,10 @@ class TestX402RequestsSecondary402:
         )
 
         req = requests.Request("GET", "http://example.com/").prepare()
-        with pytest.raises(
-            PaymentError, match=r"upstream returned 402 after payment was accepted"
-        ):
+        with pytest.raises(PaymentError) as exc_info:
             adapter.send(req, timeout=5)
+        assert "upstream returned 402 after payment was accepted" in str(exc_info.value)
+        assert "price changed" in str(exc_info.value)
 
 
 class TestX402HttpxRetryTimeout:
@@ -669,9 +663,7 @@ class TestX402HttpxRetryTimeout:
         first_response.status_code = 402
         first_response.request = MagicMock(spec=httpx.Request)
         first_response.request.headers = {}
-        first_response.aread = MagicMock(
-            return_value=asyncio.sleep(0)  # awaitable no-op
-        )
+        first_response.aread = AsyncMock(return_value=None)
         first_response.json.return_value = first_body.model_dump(by_alias=True)
         # The MagicMock(spec=httpx.Response) refuses arbitrary attribute
         # writes; declare the ones the success path would copy onto, so
@@ -683,7 +675,7 @@ class TestX402HttpxRetryTimeout:
         retry_response = MagicMock(spec=httpx.Response)
         retry_response.status_code = 402
         retry_response.headers = {}
-        retry_response._content = b""
+        retry_response.content = b'{"error": "price changed"}'
 
         class _StubAsyncClient:
             def __init__(self, **kwargs: Any) -> None:
@@ -712,7 +704,7 @@ class TestX402HttpxRetryTimeout:
         async def _run() -> None:
             await hooks.on_response(first_response)
 
-        with pytest.raises(
-            PaymentError, match=r"upstream returned 402 after payment was accepted"
-        ):
+        with pytest.raises(PaymentError) as exc_info:
             asyncio.run(_run())
+        assert "upstream returned 402 after payment was accepted" in str(exc_info.value)
+        assert "price changed" in str(exc_info.value)

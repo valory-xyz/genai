@@ -10,8 +10,8 @@ fingerprint:
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeibzpik27ktta4f7igkxkq5e5qnew6fgxeywz6poput7jfliz526v4
   clients/base.py: bafybeibew7pzzlqs3q26ivae4qr35dmw3tnvb4gt676iimogvlzz27h3ee
-  clients/httpx.py: bafybeigyisdg6xyapdf5gq3rd6i2ao5ytk3uokv2gs33jzaxjyntbvrfvi
-  clients/requests.py: bafybeidhghtp5jz2lxvf5wqlytt3vdm6anowyfryiaywh2zgrjspf5gaze
+  clients/httpx.py: bafybeigexygj4chndsebjmknijs3azjjhmuc3a2ca4js4ce3olr7xts4rq
+  clients/requests.py: bafybeihhk3y7aga47wezrpeqjvil66rkwoehxtn3qsxvkdtdrxnpoercwq
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha

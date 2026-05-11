@@ -106,7 +106,8 @@ class x402HTTPAdapter(HTTPAdapter):
                     "upstream still rejects the request."
                 )
                 raise PaymentError(
-                    "upstream returned 402 after payment was accepted"
+                    "upstream returned 402 after payment was accepted; "
+                    f"retry body (truncated): {retry_response.content[:500]!r}"
                 )
 
             # Copy the retry response data to the original response

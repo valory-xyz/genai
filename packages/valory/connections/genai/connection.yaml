@@ -7,14 +7,14 @@ license: Apache-2.0
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeihjhmzjok6icat7mvs7mtfrl5wrjc3dpyurtgzgwbvmcxiyfqolly
-  connection.py: bafybeieijoj4csnduqbjwbdfvp4ad4xs7dwujpcg56rbevnemfmq6lglbe
+  connection.py: bafybeicnfrgquhcdqah656abj2dwgyrlqxbbsz3gfnkqn57lbm44inhg6u
   readme.md: bafybeie75rbyg3e3gr5uont6auovnsktfbwugafzoy43zpqhvuaotxqlbu
   tests/__init__.py: bafybeihe2ir2kxisz74cvq3b3ou2awfunkz46gu4lutdw77nvl5fpvs4rq
-  tests/test_connection.py: bafybeiaw5mu4z3n4fzpkmrv6ietzx67z6knortaa5d4l6sdrmoqxxy47ue
+  tests/test_connection.py: bafybeifwcj3mrxfmjmk6v5wcrbaudz4dd43tz2exxspf5y23tsn6gkx6pu
   utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeieoam4u2foxw2e3aweenzqm4i4jef5oq324h6oxcui3xn22y53pru
+- valory/x402:0.1.0:bafybeieqoqsuglxyzexuwasumnkohcftytp3vxqwylz7qce5yyjqbzobyy
 protocols:
 - valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection
