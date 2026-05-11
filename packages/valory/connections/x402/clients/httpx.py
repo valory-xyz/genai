@@ -19,10 +19,8 @@ from packages.valory.connections.x402.types import x402PaymentRequiredResponse
 _logger = logging.getLogger(__name__)
 
 
-# (connect, read) seconds.
 DEFAULT_X402_HTTPX_TIMEOUT: Tuple[float, float] = (10.0, 60.0)
 
-# ``None`` is omitted: httpx treats ``Timeout(None)`` as "no timeout".
 HttpxTimeout = Union[float, Tuple[float, float], Timeout]
 
 

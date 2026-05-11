@@ -106,12 +106,7 @@ class TestDecodeXPaymentResponse:
         assert decode_x_payment_response(encoded) == payload
 
     def test_invalid_base64_raises_payment_response_decode_error(self) -> None:
-        """Non-base64 input raises ``PaymentResponseDecodeError``, not bare exception.
-
-        ``binascii.Error`` would otherwise escape and be reported to the
-        caller as a generic Genai error, masking that the payment-adapter
-        is at fault.
-        """
+        """Non-base64 input raises ``PaymentResponseDecodeError``."""
         with pytest.raises(PaymentResponseDecodeError):
             decode_x_payment_response("!!!not-base64!!!")
 

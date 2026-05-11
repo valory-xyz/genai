@@ -54,18 +54,13 @@ class PaymentResponseDecodeError(PaymentError):
 
 
 class PaymentRejectedAfterRetryError(PaymentError):
-    """Raised when the post-payment retry is itself rejected.
-
-    ``status_code`` and ``body`` are exposed on the instance; ``str()``
-    renders only the generic message so the body cannot leak through
-    user-facing error surfaces.
-    """
+    """Raised when the post-payment retry is itself rejected."""
 
     def __init__(self, *, status_code: int, body: bytes) -> None:
-        """Initialise with the upstream status code and raw response body.
+        """Initialise the error.
 
         :param status_code: HTTP status from the post-payment retry.
-        :param body: raw response body bytes from the post-payment retry.
+        :param body: raw response body from the post-payment retry.
         """
         super().__init__("upstream rejected request after payment was accepted")
         self.status_code = status_code
@@ -86,9 +81,7 @@ def decode_x_payment_response(header: str) -> Dict[str, Any]:
         - payer: str (address)
 
     Raises:
-        PaymentResponseDecodeError: If the header is not valid base64 /
-            UTF-8 / JSON. Callers should treat this as a payment-adapter
-            failure, not an upstream-API failure.
+        PaymentResponseDecodeError: If the header is not valid base64 / UTF-8 / JSON.
     """
     try:
         decoded = safe_base64_decode(header)
