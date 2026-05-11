@@ -101,9 +101,6 @@ class HttpxHooks:
                         "x402 retry returned 402 after payment header was attached; "
                         "upstream still rejects the request."
                     )
-                    response.headers = retry_response.headers
-                    response._content = retry_response._content
-                    response.status_code = retry_response.status_code
                     raise PaymentError(
                         "upstream returned 402 after payment was accepted"
                     )

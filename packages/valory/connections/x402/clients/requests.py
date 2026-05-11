@@ -105,9 +105,6 @@ class x402HTTPAdapter(HTTPAdapter):
                     "x402 retry returned 402 after payment header was attached; "
                     "upstream still rejects the request."
                 )
-                response.status_code = retry_response.status_code
-                response.headers = retry_response.headers
-                response._content = retry_response.content
                 raise PaymentError(
                     "upstream returned 402 after payment was accepted"
                 )
