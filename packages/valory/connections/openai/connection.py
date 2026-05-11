@@ -29,7 +29,7 @@ from aea.mail.base import Envelope
 from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
 from openai import APIError, AuthenticationError, OpenAI, RateLimitError
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException  # type: ignore[import-untyped]
 
 from packages.valory.protocols.llm.dialogues import LlmDialogue
 from packages.valory.protocols.llm.dialogues import LlmDialogues as BaseLlmDialogues

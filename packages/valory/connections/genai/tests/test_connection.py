@@ -335,9 +335,7 @@ class TestProcessX402RequestPaymentResponseHeader:
 
         stub._process_x402_request = fake_process
 
-        body, error = GenaiConnection._get_response(
-            stub, '{"prompt": "hi"}'
-        )
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
         assert error is True
         assert "x402 payment adapter error" in body["error"]
         assert "Genai" not in body["error"]
@@ -398,9 +396,7 @@ class TestX402RequestsSecondary402:
             call_state["n"] += 1
             return first if call_state["n"] == 1 else retry
 
-        monkeypatch.setattr(
-            requests.adapters.HTTPAdapter, "send", fake_send
-        )
+        monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
         monkeypatch.setattr(
             adapter.client,
             "create_payment_header",
@@ -513,10 +509,12 @@ class TestX402HttpxRetryTimeout:
             "packages.valory.connections.x402.clients.httpx.AsyncClient",
             _StubAsyncClient,
         )
-        hooks.client.select_payment_requirements = (
-            lambda accepts: accepts[0]
+        hooks.client.select_payment_requirements = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda accepts: accepts[0]
         )
-        hooks.client.create_payment_header = lambda *_a, **_k: "payment-header"
+        hooks.client.create_payment_header = MagicMock(  # type: ignore[method-assign]
+            return_value="payment-header"
+        )
 
         async def _run() -> None:
             await hooks.on_response(first_response)
