@@ -3,7 +3,7 @@
         "protocol/valory/srr/0.1.0": "bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4",
         "protocol/valory/llm/1.0.0": "bafybeia5vtojmw2mbc2uyukv3lciwm5gdyp4drrh4bkazqs3dlbk3u6hoa",
         "connection/valory/x402/0.1.0": "bafybeieoam4u2foxw2e3aweenzqm4i4jef5oq324h6oxcui3xn22y53pru",
-        "connection/valory/genai/0.1.0": "bafybeihy77jgb34wiymrphtg4dqcznsl4mlxvntwfmnbek7ca23ixgfsg4",
+        "connection/valory/genai/0.1.0": "bafybeiag5cfin3ptjz4amlsh2vndbplpv45446ifzynhpvx4grxwtuzyra",
         "connection/valory/openai/0.1.0": "bafybeieno5gqibodh2syerpm3occozext3aocyl53ie32you4ipxoix4ji"
     },
     "third_party": {}
