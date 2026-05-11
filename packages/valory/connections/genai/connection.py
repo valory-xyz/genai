@@ -215,18 +215,28 @@ class GenaiConnection(BaseSyncConnection):
             "contents": [{"parts": [{"text": payload["prompt"]}]}],
         }
 
-        # ``_get_response`` only populates ``response_schema`` when the
-        # incoming SRR payload carries a ``schema``. A payload without one
-        # is the common case (plain-text prompt) and must not KeyError
-        # here, so look the key up with a default of ``None`` and use that
-        # as the sentinel for "no schema".
+        # Build ``generationConfig`` defensively. The dict may be missing
+        # ``response_schema`` (plain-text prompts), missing
+        # ``response_mime_type`` (caller passed a schema without an
+        # explicit mime-type — Gemini still expects one), or carry only
+        # the mime-type (free-form JSON output, no strict shape).
+        # Look both up with ``.get`` so neither key is required, and
+        # default the mime-type to ``application/json`` whenever a schema
+        # is present, mirroring Gemini's contract for schema'd output.
         response_schema = generation_config_kwargs.get("response_schema")
-        if response_schema is not None:
-            schema = pydantic_to_gemini_schema(response_schema)
-            data["generationConfig"] = {
-                "response_mime_type": generation_config_kwargs["response_mime_type"],
-                "response_json_schema": schema,
-            }
+        response_mime_type = generation_config_kwargs.get("response_mime_type")
+        if response_schema is not None or response_mime_type is not None:
+            generation_config: Dict[str, Any] = {}
+            mime_type = response_mime_type
+            if mime_type is None and response_schema is not None:
+                mime_type = "application/json"
+            if mime_type is not None:
+                generation_config["response_mime_type"] = mime_type
+            if response_schema is not None:
+                generation_config["response_json_schema"] = pydantic_to_gemini_schema(
+                    response_schema
+                )
+            data["generationConfig"] = generation_config
         response = session.post(
             url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
         )

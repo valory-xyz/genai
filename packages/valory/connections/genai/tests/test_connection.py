@@ -387,6 +387,91 @@ class TestProcessX402RequestPaymentResponseHeader:
         assert "generationConfig" not in sent_data
         assert sent_data["contents"] == [{"parts": [{"text": "hi"}]}]
 
+    def test_schema_without_mime_type_defaults_to_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A schema with no mime-type defaults to ``application/json``.
+
+        Defensive against a future caller that builds
+        ``generation_config_kwargs`` with ``response_schema`` set but
+        ``response_mime_type`` missing. Earlier, the direct indexing of
+        ``response_mime_type`` would KeyError into the broad except and
+        the user would get a confusing Genai-labelled error.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        from pydantic import BaseModel
+
+        class _Prediction(BaseModel):
+            confidence: float
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"confidence": 0.9}'}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "predict"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={"response_schema": _Prediction},
+        )
+        assert error is False
+        assert text == '{"confidence": 0.9}'
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert sent_data["generationConfig"]["response_mime_type"] == "application/json"
+        assert "response_json_schema" in sent_data["generationConfig"]
+
+    def test_mime_type_without_schema_is_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mime-type without a schema reaches the upstream verbatim.
+
+        Gemini accepts ``response_mime_type: application/json`` on its
+        own (caller wants JSON, but no strict shape). Earlier, the new
+        ``if response_schema is not None:`` guard would skip the whole
+        ``generationConfig`` block and silently drop the mime-type.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"x": 1}'}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "free-form JSON please"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={
+                "response_mime_type": "application/json",
+                "response_schema": None,
+            },
+        )
+        assert error is False
+        assert text == '{"x": 1}'
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert sent_data["generationConfig"] == {
+            "response_mime_type": "application/json"
+        }
+        assert "response_json_schema" not in sent_data["generationConfig"]
+
 
 class TestX402RequestsSecondary402:
     """Tests covering the requests adapter's behaviour on a secondary 402."""
