@@ -390,13 +390,17 @@ class TestX402RequestsSecondary402:
         retry.headers = {}
         retry.content = b'{"x402Version": 1, "accepts": []}'
 
-        call_state = {"n": 0}
+        # Counter-based dispatch in a stub is the anti-pattern flagged in
+        # ~/.claude/rules/valory-test-integrity.md ("Avoid counter-based
+        # dispatch in stubs"). Use side_effect with an ordered list so the
+        # two distinct adapter.send calls (first 402 → payment → retry 402)
+        # come from separate mock entries, not from a shared counter.
+        send_mock = MagicMock(side_effect=[first, retry])
 
-        def fake_send(_self: object, _request: object, **_kwargs: object) -> Any:
-            call_state["n"] += 1
-            return first if call_state["n"] == 1 else retry
+        def super_send(_self: object, _request: object, **kwargs: object) -> Any:
+            return send_mock(_self, _request, **kwargs)
 
-        monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
+        monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", super_send)
         monkeypatch.setattr(
             adapter.client,
             "create_payment_header",
