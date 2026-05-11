@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 from typing import Optional, Tuple, Union
 
 import requests
@@ -14,6 +15,9 @@ from packages.valory.connections.x402.clients.base import (
     x402Client,
 )
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
+
+
+_logger = logging.getLogger(__name__)
 
 
 # (connect, read) seconds. Read is generous enough for image-bearing LLM
@@ -95,6 +99,18 @@ class x402HTTPAdapter(HTTPAdapter):
             request.headers["Access-Control-Expose-Headers"] = "X-Payment-Response"
 
             retry_response = super().send(request, **kwargs)
+
+            if retry_response.status_code == 402:
+                _logger.warning(
+                    "x402 retry returned 402 after payment header was attached; "
+                    "upstream still rejects the request."
+                )
+                response.status_code = retry_response.status_code
+                response.headers = retry_response.headers
+                response._content = retry_response.content
+                raise PaymentError(
+                    "upstream returned 402 after payment was accepted"
+                )
 
             # Copy the retry response data to the original response
             response.status_code = retry_response.status_code
