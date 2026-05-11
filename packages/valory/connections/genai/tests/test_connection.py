@@ -455,7 +455,9 @@ class TestX402RequestsSecondary402:
         )
 
         req = requests.Request("GET", "http://example.com/").prepare()
-        with pytest.raises(PaymentError, match="upstream returned 402"):
+        with pytest.raises(
+            PaymentError, match=r"upstream returned 402 after payment was accepted"
+        ):
             adapter.send(req, timeout=5)
 
 
@@ -534,7 +536,10 @@ class TestX402HttpxRetryTimeout:
             return_value=asyncio.sleep(0)  # awaitable no-op
         )
         first_response.json.return_value = first_body.model_dump(by_alias=True)
-        # Allow attribute assignment for the copy-over branch
+        # The MagicMock(spec=httpx.Response) refuses arbitrary attribute
+        # writes; declare the ones the success path would copy onto, so
+        # the test's MagicMock setup doesn't break if the raise is ever
+        # converted into the success path during a refactor.
         first_response.headers = {}
         first_response._content = b""
 
@@ -570,5 +575,7 @@ class TestX402HttpxRetryTimeout:
         async def _run() -> None:
             await hooks.on_response(first_response)
 
-        with pytest.raises(PaymentError, match="upstream returned 402"):
+        with pytest.raises(
+            PaymentError, match=r"upstream returned 402 after payment was accepted"
+        ):
             asyncio.run(_run())
