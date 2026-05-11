@@ -29,7 +29,10 @@ from aea.mail.base import Envelope
 from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
 from openai import APIError, AuthenticationError, OpenAI, RateLimitError
-from requests.exceptions import RequestException  # type: ignore[import-untyped]
+from requests.exceptions import (  # type: ignore[import-untyped]
+    JSONDecodeError,
+    RequestException,
+)
 
 from packages.valory.protocols.llm.dialogues import LlmDialogue
 from packages.valory.protocols.llm.dialogues import LlmDialogues as BaseLlmDialogues
@@ -252,13 +255,7 @@ class OpenaiConnection(BaseSyncConnection):
             except KeyError as exc:
                 self.logger.error(f"Staging API response missing 'text' key: {exc}")
                 return "OpenAI staging API schema error"
-            except ValueError as exc:
-                # response.json() raises ValueError (json.JSONDecodeError
-                # subclass) when the staging server returns non-JSON, e.g.
-                # a CDN/proxy HTML error page on a 200. ``ValueError`` is
-                # listed before ``RequestException`` because
-                # ``requests.exceptions.JSONDecodeError`` inherits from
-                # both; the more specific decode-failure label wins.
+            except JSONDecodeError as exc:
                 self.logger.error(f"Staging API returned non-JSON body: {exc}")
                 return "OpenAI staging API decode error"
             except RequestException as exc:

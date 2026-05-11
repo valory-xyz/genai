@@ -52,14 +52,7 @@ def _make_stub_for_staging() -> Any:
 
 
 class TestStagingApiFailureModes:
-    """Tests covering uncaught error paths in the OpenAI staging API branch.
-
-    Before this fix, ``requests.exceptions.RequestException``,
-    ``ValueError`` (which JSONDecodeError subclasses), and ``KeyError``
-    from the staging branch escaped ``_get_response`` and ``on_send``.
-    The pool task callback logged but never sent a response envelope,
-    so the calling skill hung until its own round timeout.
-    """
+    """Tests covering error paths in the OpenAI staging API branch."""
 
     def test_network_failure_returns_error_string(
         self, monkeypatch: pytest.MonkeyPatch
@@ -171,14 +164,7 @@ def _drive_on_send_with(exc: Exception) -> str:
 
 
 class TestOnSendExceptionClassifier:
-    """Tests covering the SDK-path except chain in ``on_send``.
-
-    ``RateLimitError`` subclasses ``APIError`` in openai-python
-    (MRO: RateLimitError -> APIStatusError -> APIError -> OpenAIError).
-    The catch clause for ``RateLimitError`` must precede ``APIError``,
-    otherwise rate-limited calls are silently relabelled as generic
-    server errors and downstream alerting loses the distinction.
-    """
+    """Tests covering the SDK-path except chain in ``on_send``."""
 
     def test_authentication_error_is_labelled(self) -> None:
         """Auth failures route to the auth label."""

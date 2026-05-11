@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 
 from packages.valory.connections.x402.clients.base import (
     PaymentError,
+    PaymentRejectedAfterRetryError,
     PaymentSelectorCallable,
     x402Client,
 )
@@ -105,9 +106,12 @@ class x402HTTPAdapter(HTTPAdapter):
                     "x402 retry returned 402 after payment header was attached; "
                     "upstream still rejects the request."
                 )
-                raise PaymentError(
-                    "upstream returned 402 after payment was accepted; "
-                    f"retry body (truncated): {retry_response.content[:500]!r}"
+                _logger.debug(
+                    "x402 retry body (truncated): %r", retry_response.content[:500]
+                )
+                raise PaymentRejectedAfterRetryError(
+                    status_code=retry_response.status_code,
+                    body=retry_response.content,
                 )
 
             # Copy the retry response data to the original response

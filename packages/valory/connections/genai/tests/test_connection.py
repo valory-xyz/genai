@@ -137,13 +137,7 @@ class TestGenerateContentDeadline:
 
 
 class TestProcessX402RequestPaymentResponseHeader:
-    """Tests covering payment-response header handling in ``_process_x402_request``.
-
-    The earlier code accessed ``payment_response['transaction']`` directly,
-    so a successful Gemini call whose payment header was missing the key
-    was reported to the user as a Genai error. The fix uses ``.get()`` so
-    logging cannot derail a successful response.
-    """
+    """Tests for ``_process_x402_request``."""
 
     def _make_x402_stub(self) -> Any:
         """Build a stub with the attributes ``_process_x402_request`` reads."""
@@ -160,7 +154,7 @@ class TestProcessX402RequestPaymentResponseHeader:
     def test_payment_header_missing_transaction_does_not_break_response(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Logging falls back to ``<missing>`` and the call returns the text.
+        """A missing ``transaction`` key in the payment header is tolerated.
 
         :param monkeypatch: pytest fixture used to stub the x402 session.
         """
@@ -192,17 +186,9 @@ class TestProcessX402RequestPaymentResponseHeader:
         assert text == "hello"
 
     def test_payment_error_is_labeled_as_payment_adapter_error(self) -> None:
-        """A ``PaymentError`` is reported under an x402 label, not as a Genai error.
-
-        Drives ``_get_response`` so the typed ``except PaymentError`` branch
-        is exercised end-to-end.
-        """
+        """``PaymentError`` is surfaced under an x402 label, not as a Genai error."""
         stub = self._make_x402_stub()
 
-        # Bind a stub _process_x402_request onto the namespace so
-        # ``_get_response``'s call to ``self._process_x402_request(...)``
-        # resolves here. Only the typed-except branch is under test, not
-        # the inner request flow.
         def fake_process(*_a: Any, **_k: Any) -> Any:
             raise PaymentError("Failed to handle payment: boom")
 
@@ -216,16 +202,7 @@ class TestProcessX402RequestPaymentResponseHeader:
     def test_plain_prompt_without_schema_reaches_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A prompt-only payload (no schema) reaches the HTTP call.
-
-        Earlier, ``_process_x402_request`` read
-        ``generation_config_kwargs['response_schema']`` unconditionally
-        and KeyError'd whenever the SRR payload had no ``schema``. The
-        broad except wrapped that as a Genai-labelled error, hiding the
-        adapter bug. This test goes through ``_get_response`` (which
-        builds the kwargs from the payload) end-to-end and asserts the
-        request reaches the session — proving the lookup tolerates the
-        missing key.
+        """A prompt-only payload reaches the upstream and forwards temperature.
 
         :param monkeypatch: pytest fixture used to stub the x402 session.
         """
@@ -265,12 +242,6 @@ class TestProcessX402RequestPaymentResponseHeader:
     ) -> None:
         """A schema with no mime-type defaults to ``application/json``.
 
-        Defensive against a future caller that builds
-        ``generation_config_kwargs`` with ``response_schema`` set but
-        ``response_mime_type`` missing. Earlier, the direct indexing of
-        ``response_mime_type`` would KeyError into the broad except and
-        the user would get a confusing Genai-labelled error.
-
         :param monkeypatch: pytest fixture used to stub the x402 session.
         """
         from pydantic import BaseModel
@@ -306,12 +277,7 @@ class TestProcessX402RequestPaymentResponseHeader:
     def test_custom_mime_type_with_schema_is_preserved(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A caller-provided non-default mime-type survives alongside a schema.
-
-        Pins both keys' wire format in a single ``generationConfig`` dict.
-        Catches the mutation ``if mime_type is None and response_schema
-        is not None`` → ``or`` — that flip would unconditionally overwrite
-        any caller-provided mime-type with ``application/json``.
+        """A caller-provided mime-type survives alongside a schema.
 
         :param monkeypatch: pytest fixture used to stub the x402 session.
         """
@@ -359,11 +325,6 @@ class TestProcessX402RequestPaymentResponseHeader:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A mime-type without a schema reaches the upstream verbatim.
-
-        Gemini accepts ``response_mime_type: application/json`` on its
-        own (caller wants JSON, but no strict shape). Earlier, the new
-        ``if response_schema is not None:`` guard would skip the whole
-        ``generationConfig`` block and silently drop the mime-type.
 
         :param monkeypatch: pytest fixture used to stub the x402 session.
         """

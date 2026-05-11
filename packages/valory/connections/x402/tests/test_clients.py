@@ -16,6 +16,7 @@ from eth_account import Account
 
 from packages.valory.connections.x402.clients.base import (
     PaymentError,
+    PaymentRejectedAfterRetryError,
     PaymentResponseDecodeError,
     decode_x_payment_response,
 )
@@ -134,15 +135,10 @@ class TestDecodeXPaymentResponse:
 class TestX402RequestsSecondary402:
     """Tests covering the requests adapter's behaviour on a secondary 402."""
 
-    def test_secondary_402_raises_payment_error(
+    def test_secondary_402_raises_typed_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A 402 on the post-payment retry surfaces as ``PaymentError``.
-
-        Before the fix, the retry's 402 body was silently copied to the
-        original response and returned, leaving the caller to discover
-        the failure by reading the body. Now it raises a typed error
-        with a clear message that includes the retry body.
+        """Second 402 raises ``PaymentRejectedAfterRetryError`` with attached body.
 
         :param monkeypatch: pytest fixture used to stub adapter internals.
         """
@@ -193,10 +189,15 @@ class TestX402RequestsSecondary402:
         )
 
         req = requests.Request("GET", "http://example.com/").prepare()
-        with pytest.raises(PaymentError) as exc_info:
+        with pytest.raises(PaymentRejectedAfterRetryError) as exc_info:
             adapter.send(req, timeout=5)
-        assert "upstream returned 402 after payment was accepted" in str(exc_info.value)
-        assert "price changed" in str(exc_info.value)
+        assert exc_info.value.status_code == 402
+        assert b"price changed" in exc_info.value.body
+        assert "price changed" not in str(exc_info.value)
+        assert (
+            str(exc_info.value)
+            == "upstream rejected request after payment was accepted"
+        )
 
 
 class TestX402HttpxRetryTimeout:
@@ -234,10 +235,10 @@ class TestX402HttpxRetryTimeout:
         assert hooks_instance._retry_timeout.connect == 2.5
         assert hooks_instance._retry_timeout.read == 6.0
 
-    def test_secondary_402_raises_payment_error(
+    def test_secondary_402_raises_typed_error_with_body_attribute(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A 402 on the post-payment retry surfaces as ``PaymentError``.
+        """Second 402 raises typed error; verifies timeout reaches the retry client.
 
         :param monkeypatch: pytest fixture used to stub the retry client.
         """
@@ -246,7 +247,7 @@ class TestX402HttpxRetryTimeout:
             x402PaymentRequiredResponse,
         )
 
-        hooks = HttpxHooks(MagicMock())
+        hooks = HttpxHooks(MagicMock(), retry_timeout=(2.5, 7.5))
         first_body = x402PaymentRequiredResponse(
             x402_version=1,
             accepts=[
@@ -279,9 +280,11 @@ class TestX402HttpxRetryTimeout:
         retry_response.headers = {}
         retry_response.content = b'{"error": "price changed"}'
 
+        captured_kwargs: list = []
+
         class _StubAsyncClient:
             def __init__(self, **kwargs: Any) -> None:
-                self.kwargs = kwargs
+                captured_kwargs.append(kwargs)
 
             async def __aenter__(self) -> "_StubAsyncClient":
                 return self
@@ -306,7 +309,98 @@ class TestX402HttpxRetryTimeout:
         async def _run() -> None:
             await hooks.on_response(first_response)
 
-        with pytest.raises(PaymentError) as exc_info:
+        with pytest.raises(PaymentRejectedAfterRetryError) as exc_info:
             asyncio.run(_run())
-        assert "upstream returned 402 after payment was accepted" in str(exc_info.value)
-        assert "price changed" in str(exc_info.value)
+        assert exc_info.value.status_code == 402
+        assert b"price changed" in exc_info.value.body
+        assert "price changed" not in str(exc_info.value)
+        assert (
+            str(exc_info.value)
+            == "upstream rejected request after payment was accepted"
+        )
+
+        assert len(captured_kwargs) == 1
+        timeout = captured_kwargs[0]["timeout"]
+        assert timeout.connect == 2.5
+        assert timeout.read == 7.5
+
+    def test_consecutive_402s_on_same_client_both_handled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_is_retry`` is cleared after every cycle so the next 402 is handled.
+
+        :param monkeypatch: pytest fixture used to stub the retry client.
+        """
+        from packages.valory.connections.x402.types import (
+            PaymentRequirements,
+            x402PaymentRequiredResponse,
+        )
+
+        hooks = HttpxHooks(MagicMock())
+        body = x402PaymentRequiredResponse(
+            x402_version=1,
+            accepts=[
+                PaymentRequirements(
+                    scheme="exact",
+                    network="base",
+                    max_amount_required="1",
+                    resource="http://example.com/",
+                    description="t",
+                    mime_type="application/json",
+                    pay_to="0x0000000000000000000000000000000000000000",
+                    max_timeout_seconds=60,
+                    asset="0x0000000000000000000000000000000000000000",
+                )
+            ],
+            error="",
+        )
+
+        def _make_first_response() -> Any:
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 402
+            resp.request = MagicMock(spec=httpx.Request)
+            resp.request.headers = {}
+            resp.aread = AsyncMock(return_value=None)
+            resp.json.return_value = body.model_dump(by_alias=True)
+            resp.headers = {}
+            resp._content = b""
+            return resp
+
+        retry_ok = MagicMock(spec=httpx.Response)
+        retry_ok.status_code = 200
+        retry_ok.headers = {}
+        retry_ok._content = b"ok"
+
+        class _StubAsyncClient:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> "_StubAsyncClient":
+                return self
+
+            async def __aexit__(self, *_a: Any) -> None:
+                return None
+
+            async def send(self, _request: object) -> object:
+                return retry_ok
+
+        monkeypatch.setattr(
+            "packages.valory.connections.x402.clients.httpx.AsyncClient",
+            _StubAsyncClient,
+        )
+        header_calls: list = []
+        hooks.client.select_payment_requirements = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda accepts: accepts[0]
+        )
+        hooks.client.create_payment_header = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda *_a, **_k: header_calls.append(None) or "header",
+        )
+
+        async def _run() -> None:
+            await hooks.on_response(_make_first_response())
+            await hooks.on_response(_make_first_response())
+
+        asyncio.run(_run())
+
+        assert len(header_calls) == 2
+        assert hooks._is_retry is False

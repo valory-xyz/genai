@@ -9,6 +9,7 @@ from httpx import AsyncClient, Request, Response, Timeout
 from packages.valory.connections.x402.clients.base import (
     MissingRequestConfigError,
     PaymentError,
+    PaymentRejectedAfterRetryError,
     PaymentSelectorCallable,
     x402Client,
 )
@@ -18,11 +19,11 @@ from packages.valory.connections.x402.types import x402PaymentRequiredResponse
 _logger = logging.getLogger(__name__)
 
 
-# (connect, read) seconds. Mirrors the requests adapter's default so a hung
-# upstream cannot block the retry call indefinitely.
+# (connect, read) seconds.
 DEFAULT_X402_HTTPX_TIMEOUT: Tuple[float, float] = (10.0, 60.0)
 
-HttpxTimeout = Union[float, Tuple[float, float], Timeout, None]
+# ``None`` is omitted: httpx treats ``Timeout(None)`` as "no timeout".
+HttpxTimeout = Union[float, Tuple[float, float], Timeout]
 
 
 def _coerce_httpx_timeout(value: HttpxTimeout) -> Timeout:
@@ -60,6 +61,7 @@ class HttpxHooks:
         if self._is_retry:
             return response
 
+        self._is_retry = True
         try:
             if not response.request:
                 raise MissingRequestConfigError("Missing request configuration")
@@ -71,53 +73,45 @@ class HttpxHooks:
 
             payment_response = x402PaymentRequiredResponse(**data)
 
-            # Select payment requirements
             selected_requirements = self.client.select_payment_requirements(
                 payment_response.accepts
             )
 
-            # Create payment header
             payment_header = self.client.create_payment_header(
                 selected_requirements, payment_response.x402_version
             )
 
-            # Mark as retry and add payment header
-            self._is_retry = True
             request = response.request
-
             request.headers["X-Payment"] = payment_header
             request.headers["Access-Control-Expose-Headers"] = "X-Payment-Response"
 
-            # Retry the request. The fresh AsyncClient does not inherit the
-            # caller's timeout, so apply the adapter's configured value
-            # explicitly — without it, the retry uses httpx's default which
-            # may not match the caller's expectations and can hang on some
-            # httpx versions.
             async with AsyncClient(timeout=self._retry_timeout) as client:
                 retry_response = await client.send(request)
 
-                if retry_response.status_code == 402:
-                    _logger.warning(
-                        "x402 retry returned 402 after payment header was attached; "
-                        "upstream still rejects the request."
-                    )
-                    raise PaymentError(
-                        "upstream returned 402 after payment was accepted; "
-                        f"retry body (truncated): {retry_response.content[:500]!r}"
-                    )
+            if retry_response.status_code == 402:
+                _logger.warning(
+                    "x402 retry returned 402 after payment header was attached; "
+                    "upstream still rejects the request."
+                )
+                _logger.debug(
+                    "x402 retry body (truncated): %r", retry_response.content[:500]
+                )
+                raise PaymentRejectedAfterRetryError(
+                    status_code=retry_response.status_code,
+                    body=retry_response.content,
+                )
 
-                # Copy the retry response data to the original response
-                response.status_code = retry_response.status_code
-                response.headers = retry_response.headers
-                response._content = retry_response._content
-                return response
+            response.status_code = retry_response.status_code
+            response.headers = retry_response.headers
+            response._content = retry_response._content
+            return response
 
-        except PaymentError as e:
-            self._is_retry = False
-            raise e
+        except PaymentError:
+            raise
         except Exception as e:
-            self._is_retry = False
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e
+        finally:
+            self._is_retry = False
 
 
 def x402_payment_hooks(
