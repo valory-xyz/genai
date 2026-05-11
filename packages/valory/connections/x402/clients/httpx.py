@@ -1,5 +1,6 @@
 # Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
 
+import concurrent.futures
 import logging
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -104,7 +105,7 @@ class HttpxHooks:
             response._content = retry_response._content
             return response
 
-        except PaymentError:
+        except (PaymentError, concurrent.futures.CancelledError):
             raise
         except Exception as e:
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e

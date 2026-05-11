@@ -295,7 +295,7 @@ class OpenaiConnection(BaseSyncConnection):
 
     def on_connect(self) -> None:
         """
-        Tear down the connection.
+        Set up the connection.
 
         Connection status set automatically.
         """

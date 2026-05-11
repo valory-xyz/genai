@@ -194,6 +194,65 @@ class TestX402RequestsSecondary402:
             == "upstream rejected request after payment was accepted"
         )
 
+    def test_cancelled_error_propagates_without_wrapping(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``concurrent.futures.CancelledError`` propagates unwrapped.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        """
+        import concurrent.futures
+
+        from packages.valory.connections.x402.clients.requests import x402HTTPAdapter
+        from packages.valory.connections.x402.types import (
+            PaymentRequirements,
+            x402PaymentRequiredResponse,
+        )
+
+        session = x402_requests(Account.create())
+        adapter: x402HTTPAdapter = session.get_adapter("http://example.com/")
+
+        first = MagicMock()
+        first.status_code = 402
+        first_body = x402PaymentRequiredResponse(
+            x402_version=1,
+            accepts=[
+                PaymentRequirements(
+                    scheme="exact",
+                    network="base",
+                    max_amount_required="1",
+                    resource="http://example.com/",
+                    description="t",
+                    mime_type="application/json",
+                    pay_to="0x0000000000000000000000000000000000000000",
+                    max_timeout_seconds=60,
+                    asset="0x0000000000000000000000000000000000000000",
+                )
+            ],
+            error="",
+        )
+        first.content = json.dumps(first_body.model_dump(by_alias=True)).encode("utf-8")
+
+        def super_send(_self: object, _request: object, **kwargs: object) -> Any:
+            if not super_send.first_done:  # type: ignore[attr-defined]
+                super_send.first_done = True  # type: ignore[attr-defined]
+                return first
+            raise concurrent.futures.CancelledError()
+
+        super_send.first_done = False  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", super_send)
+        monkeypatch.setattr(
+            adapter.client,
+            "create_payment_header",
+            lambda *_a, **_k: "payment-header",
+        )
+
+        req = requests.Request("GET", "http://example.com/").prepare()
+        with pytest.raises(concurrent.futures.CancelledError):
+            adapter.send(req, timeout=5)
+        assert adapter._is_retry is False
+
 
 class TestX402HttpxRetryTimeout:
     """Tests covering timeout inheritance + secondary-402 handling for httpx."""

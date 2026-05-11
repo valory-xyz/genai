@@ -25,6 +25,7 @@ import pickle  # nosec
 from typing import Any, Dict, Tuple, cast
 
 import google.generativeai as genai  # type: ignore
+import requests  # type: ignore[import-untyped]
 from aea.configurations.base import PublicId
 from aea.connections.base import BaseSyncConnection
 from aea.mail.base import Envelope
@@ -236,12 +237,17 @@ class GenaiConnection(BaseSyncConnection):
             url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
         )
 
-        result = response.json()
+        try:
+            response.raise_for_status()
+            result = response.json()
+        except requests.exceptions.HTTPError as exc:
+            raise PaymentError(f"x402 upstream returned HTTP error: {exc}") from exc
+        except ValueError as exc:
+            raise PaymentError(f"x402 upstream returned non-JSON body: {exc}") from exc
 
         if "error" in result:
             raise ValueError(f"Genai API error: {result['error']}")
 
-        # Check for payment response header
         if "X-Payment-Response" in response.headers:
             payment_response = decode_x_payment_response(
                 response.headers["X-Payment-Response"]
@@ -253,13 +259,9 @@ class GenaiConnection(BaseSyncConnection):
         else:
             self.logger.warning("Warning: No payment response header found")
 
-        # Extract text response
-        text = (
-            result.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
+        candidates = result.get("candidates") or [{}]
+        parts = candidates[0].get("content", {}).get("parts") or [{}]
+        text = parts[0].get("text", "")
         if text == "":
             raise ValueError("Empty response from Genai API")
 
@@ -339,7 +341,7 @@ class GenaiConnection(BaseSyncConnection):
 
     def on_connect(self) -> None:
         """
-        Tear down the connection.
+        Set up the connection.
 
         Connection status set automatically.
         """

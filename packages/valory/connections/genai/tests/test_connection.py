@@ -357,3 +357,108 @@ class TestProcessX402RequestPaymentResponseHeader:
             "response_mime_type": "application/json"
         }
         assert "response_json_schema" not in sent_data["generationConfig"]
+
+    def test_upstream_http_error_raises_payment_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-2xx response surfaces as ``PaymentError``, not a Genai error.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        import requests as _requests
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.side_effect = _requests.exceptions.HTTPError(
+            "500 Server Error"
+        )
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(PaymentError, match="x402 upstream returned HTTP error"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_upstream_non_json_body_raises_payment_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 with a non-JSON body surfaces as ``PaymentError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.side_effect = ValueError("Expecting value")
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(PaymentError, match="x402 upstream returned non-JSON body"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_empty_candidates_does_not_index_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``candidates`` list raises ``ValueError``, not ``IndexError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"candidates": []}
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(ValueError, match="Empty response from Genai API"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_empty_parts_does_not_index_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``parts`` list raises ``ValueError``, not ``IndexError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"candidates": [{"content": {"parts": []}}]}
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(ValueError, match="Empty response from Genai API"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )

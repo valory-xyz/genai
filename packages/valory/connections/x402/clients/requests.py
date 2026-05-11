@@ -1,5 +1,6 @@
 # Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
 
+import concurrent.futures
 import copy
 import json
 import logging
@@ -120,9 +121,9 @@ class x402HTTPAdapter(HTTPAdapter):
             response._content = retry_response.content
             return response
 
-        except PaymentError as e:
+        except (PaymentError, concurrent.futures.CancelledError):
             self._is_retry = False
-            raise e
+            raise
         except Exception as e:
             self._is_retry = False
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e
