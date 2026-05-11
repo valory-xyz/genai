@@ -195,12 +195,12 @@ class OpenaiConnection(BaseSyncConnection):
         except AuthenticationError as e:
             self.logger.error(e)
             value = "OpenAI authentication error"
-        except APIError as e:
-            self.logger.error(e)
-            value = "OpenAI server error"
         except RateLimitError as e:
             self.logger.error(e)
             value = "OpenAI rate limit error"
+        except APIError as e:
+            self.logger.error(e)
+            value = "OpenAI server error"
 
         response_message = cast(
             LlmMessage,

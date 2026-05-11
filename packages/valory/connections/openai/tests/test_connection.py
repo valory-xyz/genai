@@ -24,13 +24,15 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from openai import APIError, AuthenticationError, RateLimitError
 
 from packages.valory.connections.openai import connection as openai_connection
 from packages.valory.connections.openai.connection import OpenaiConnection
+from packages.valory.protocols.llm.message import LlmMessage
 
 
 def _make_stub_for_staging() -> Any:
@@ -128,3 +130,67 @@ class TestStagingApiFailureModes:
 
         result = OpenaiConnection._get_response(stub, "irrelevant", {})
         assert result == "hello"
+
+
+def _make_on_send_stub() -> Any:
+    """Build a minimal stub for driving ``on_send`` through its except chain."""
+    dialogue = MagicMock()
+    dialogues = MagicMock()
+    dialogues.update.return_value = dialogue
+    return SimpleNamespace(
+        logger=MagicMock(),
+        dialogues=dialogues,
+        put_envelope=MagicMock(),
+    )
+
+
+def _make_request_envelope() -> Any:
+    """Build a minimal Envelope-shaped namespace carrying a REQUEST message."""
+    message = SimpleNamespace(
+        performative=LlmMessage.Performative.REQUEST,
+        prompt_template="",
+        prompt_values={},
+    )
+    return SimpleNamespace(
+        message=message,
+        sender="agent",
+        to="connection",
+        context=MagicMock(),
+    )
+
+
+def _drive_on_send_with(exc: Exception) -> str:
+    """Call ``on_send`` with ``_get_response`` raising ``exc`` and read the classified value."""
+    stub = _make_on_send_stub()
+    envelope = _make_request_envelope()
+    stub._get_response = MagicMock(side_effect=exc)
+    with patch.object(openai_connection, "Envelope", MagicMock()):
+        OpenaiConnection.on_send(stub, envelope)
+    reply_call = stub.dialogues.update.return_value.reply.call_args
+    return reply_call.kwargs["value"]
+
+
+class TestOnSendExceptionClassifier:
+    """Tests covering the SDK-path except chain in ``on_send``.
+
+    ``RateLimitError`` subclasses ``APIError`` in openai-python
+    (MRO: RateLimitError -> APIStatusError -> APIError -> OpenAIError).
+    The catch clause for ``RateLimitError`` must precede ``APIError``,
+    otherwise rate-limited calls are silently relabelled as generic
+    server errors and downstream alerting loses the distinction.
+    """
+
+    def test_authentication_error_is_labelled(self) -> None:
+        """Auth failures route to the auth label."""
+        exc = AuthenticationError(message="bad key", response=MagicMock(), body=None)
+        assert _drive_on_send_with(exc) == "OpenAI authentication error"
+
+    def test_rate_limit_error_is_labelled(self) -> None:
+        """Rate-limit errors must not be shadowed by the APIError catch-all."""
+        exc = RateLimitError(message="429", response=MagicMock(), body=None)
+        assert _drive_on_send_with(exc) == "OpenAI rate limit error"
+
+    def test_generic_api_error_is_labelled(self) -> None:
+        """A bare APIError falls through to the catch-all clause."""
+        exc = APIError(message="5xx", request=MagicMock(), body=None)
+        assert _drive_on_send_with(exc) == "OpenAI server error"
