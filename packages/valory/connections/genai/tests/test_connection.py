@@ -430,6 +430,58 @@ class TestProcessX402RequestPaymentResponseHeader:
         assert sent_data["generationConfig"]["response_mime_type"] == "application/json"
         assert "response_json_schema" in sent_data["generationConfig"]
 
+    def test_custom_mime_type_with_schema_is_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller-provided non-default mime-type survives alongside a schema.
+
+        Pins both keys' wire format in a single ``generationConfig`` dict.
+        Catches the mutation ``if mime_type is None and response_schema
+        is not None`` → ``or`` — that flip would unconditionally overwrite
+        any caller-provided mime-type with ``application/json``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        from pydantic import BaseModel
+
+        class _Prediction(BaseModel):
+            confidence: float
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "confidence=0.9"}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "predict"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={
+                "response_schema": _Prediction,
+                "response_mime_type": "text/plain",
+            },
+        )
+        assert error is False
+        assert text == "confidence=0.9"
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        gen_config = sent_data["generationConfig"]
+        # Pin the full shape: both keys present, mime-type is the
+        # caller's value, schema produced from the Pydantic class.
+        assert set(gen_config.keys()) == {
+            "response_mime_type",
+            "response_json_schema",
+        }
+        assert gen_config["response_mime_type"] == "text/plain"
+        assert gen_config["response_json_schema"] == _Prediction.model_json_schema()
+
     def test_mime_type_without_schema_is_preserved(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
