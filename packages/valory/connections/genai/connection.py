@@ -215,10 +215,14 @@ class GenaiConnection(BaseSyncConnection):
             "contents": [{"parts": [{"text": payload["prompt"]}]}],
         }
 
-        if generation_config_kwargs["response_schema"] is not None:
-            schema = pydantic_to_gemini_schema(
-                generation_config_kwargs["response_schema"]
-            )
+        # ``_get_response`` only populates ``response_schema`` when the
+        # incoming SRR payload carries a ``schema``. A payload without one
+        # is the common case (plain-text prompt) and must not KeyError
+        # here, so look the key up with a default of ``None`` and use that
+        # as the sentinel for "no schema".
+        response_schema = generation_config_kwargs.get("response_schema")
+        if response_schema is not None:
+            schema = pydantic_to_gemini_schema(response_schema)
             data["generationConfig"] = {
                 "response_mime_type": generation_config_kwargs["response_mime_type"],
                 "response_json_schema": schema,

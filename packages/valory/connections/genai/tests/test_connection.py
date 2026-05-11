@@ -327,9 +327,8 @@ class TestProcessX402RequestPaymentResponseHeader:
 
         # Bind a stub _process_x402_request onto the namespace so
         # ``_get_response``'s call to ``self._process_x402_request(...)``
-        # resolves here. This sidesteps the unrelated pre-existing keyerror
-        # path on ``generation_config_kwargs["response_schema"]`` and only
-        # exercises the typed-except branch we care about.
+        # resolves here. Only the typed-except branch is under test, not
+        # the inner request flow.
         def fake_process(*_a: Any, **_k: Any) -> Any:
             raise PaymentError("Failed to handle payment: boom")
 
@@ -339,6 +338,54 @@ class TestProcessX402RequestPaymentResponseHeader:
         assert error is True
         assert "x402 payment adapter error" in body["error"]
         assert "Genai" not in body["error"]
+
+    def test_plain_prompt_without_schema_reaches_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prompt-only payload (no schema) reaches the HTTP call.
+
+        Earlier, ``_process_x402_request`` read
+        ``generation_config_kwargs['response_schema']`` unconditionally
+        and KeyError'd whenever the SRR payload had no ``schema``. The
+        broad except wrapped that as a Genai-labelled error, hiding the
+        adapter bug. This test goes through ``_get_response`` (which
+        builds the kwargs from the payload) end-to-end and asserts the
+        request reaches the session — proving the lookup tolerates the
+        missing key.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+
+        gemini_text = "Plain prompt response from Gemini."
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": gemini_text}]}}]
+        }
+        fake_response.headers = {}  # no payment-response header
+
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        # ``self._process_x402_request`` resolves against the stub, not
+        # the class. Bind the real implementation with the stub as self.
+        stub._process_x402_request = (
+            lambda *a, **k: GenaiConnection._process_x402_request(stub, *a, **k)
+        )
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
+        assert error is False
+        assert body == {"response": gemini_text}
+
+        # The request body must omit generationConfig when no schema is
+        # supplied — otherwise the server gets an empty schema and may
+        # reject the call.
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert "generationConfig" not in sent_data
+        assert sent_data["contents"] == [{"parts": [{"text": "hi"}]}]
 
 
 class TestX402RequestsSecondary402:
