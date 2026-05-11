@@ -1,5 +1,6 @@
 # Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
 
+import binascii
 import json
 import secrets
 import time
@@ -20,24 +21,6 @@ PaymentSelectorCallable = Callable[
     [List[PaymentRequirements], Optional[str], Optional[str], Optional[int]],
     PaymentRequirements,
 ]
-
-
-def decode_x_payment_response(header: str) -> Dict[str, Any]:
-    """Decode the X-PAYMENT-RESPONSE header.
-
-    Args:
-        header: The X-PAYMENT-RESPONSE header to decode
-
-    Returns:
-        The decoded payment response containing:
-        - success: bool
-        - transaction: str (hex)
-        - network: str
-        - payer: str (address)
-    """
-    decoded = safe_base64_decode(header)
-    result = json.loads(decoded)
-    return result
 
 
 class PaymentError(Exception):
@@ -62,6 +45,44 @@ class PaymentAlreadyAttemptedError(PaymentError):
     """Raised when payment has already been attempted."""
 
     pass
+
+
+class PaymentResponseDecodeError(PaymentError):
+    """Raised when X-PAYMENT-RESPONSE header cannot be decoded."""
+
+    pass
+
+
+def decode_x_payment_response(header: str) -> Dict[str, Any]:
+    """Decode the X-PAYMENT-RESPONSE header.
+
+    Args:
+        header: The X-PAYMENT-RESPONSE header to decode
+
+    Returns:
+        The decoded payment response containing:
+        - success: bool
+        - transaction: str (hex)
+        - network: str
+        - payer: str (address)
+
+    Raises:
+        PaymentResponseDecodeError: If the header is not valid base64 /
+            UTF-8 / JSON. Callers should treat this as a payment-adapter
+            failure, not an upstream-API failure.
+    """
+    try:
+        decoded = safe_base64_decode(header)
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise PaymentResponseDecodeError(
+            f"X-PAYMENT-RESPONSE header is not valid base64/UTF-8: {exc}"
+        ) from exc
+    try:
+        return json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise PaymentResponseDecodeError(
+            f"X-PAYMENT-RESPONSE header is not valid JSON: {exc}"
+        ) from exc
 
 
 class x402Client:

@@ -33,7 +33,10 @@ from aea.protocols.dialogue.base import Dialogue
 from eth_account import Account
 
 from packages.valory.connections.genai.utils import pydantic_to_gemini_schema
-from packages.valory.connections.x402.clients.base import decode_x_payment_response
+from packages.valory.connections.x402.clients.base import (
+    PaymentError,
+    decode_x_payment_response,
+)
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
@@ -235,7 +238,8 @@ class GenaiConnection(BaseSyncConnection):
                 response.headers["X-Payment-Response"]
             )
             self.logger.info(
-                f"Payment response transaction hash: {payment_response['transaction']}"
+                "Payment response transaction hash: "
+                f"{payment_response.get('transaction', '<missing>')}"
             )
         else:
             self.logger.warning("Warning: No payment response header found")
@@ -316,6 +320,8 @@ class GenaiConnection(BaseSyncConnection):
                 )
                 response_text = response.text  # type: ignore
                 error = False
+        except PaymentError as e:
+            return {"error": f"x402 payment adapter error: {e}"}, True
         except Exception as e:  # pylint: disable=broad-except
             return {"error": f"Exception while calling Genai: {e}"}, True
 
