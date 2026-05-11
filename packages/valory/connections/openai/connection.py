@@ -29,6 +29,7 @@ from aea.mail.base import Envelope
 from aea.protocols.base import Address, Message
 from aea.protocols.dialogue.base import Dialogue
 from openai import APIError, AuthenticationError, OpenAI, RateLimitError
+from requests.exceptions import RequestException
 
 from packages.valory.protocols.llm.dialogues import LlmDialogue
 from packages.valory.protocols.llm.dialogues import LlmDialogues as BaseLlmDialogues
@@ -241,12 +242,28 @@ class OpenaiConnection(BaseSyncConnection):
         # Call the staging API
         if self.openai_settings["use_openai_staging_api"]:
             url = self.openai_settings["openai_staging_api"]
-            response = requests.post(
-                url,
-                json={"engine": engine, "prompt": formatted_prompt},
-                timeout=request_timeout,
-            )
-            return response.json()["text"]
+            try:
+                response = requests.post(
+                    url,
+                    json={"engine": engine, "prompt": formatted_prompt},
+                    timeout=request_timeout,
+                )
+                return response.json()["text"]
+            except KeyError as exc:
+                self.logger.error(f"Staging API response missing 'text' key: {exc}")
+                return "OpenAI staging API schema error"
+            except ValueError as exc:
+                # response.json() raises ValueError (json.JSONDecodeError
+                # subclass) when the staging server returns non-JSON, e.g.
+                # a CDN/proxy HTML error page on a 200. ``ValueError`` is
+                # listed before ``RequestException`` because
+                # ``requests.exceptions.JSONDecodeError`` inherits from
+                # both; the more specific decode-failure label wins.
+                self.logger.error(f"Staging API returned non-JSON body: {exc}")
+                return "OpenAI staging API decode error"
+            except RequestException as exc:
+                self.logger.error(f"Staging API request failed: {exc}")
+                return "OpenAI staging API request error"
 
         # Call the OpenAI API
         if engine in ENGINES["chat"]:
