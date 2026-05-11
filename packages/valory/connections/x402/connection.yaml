@@ -9,9 +9,9 @@ fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeibzpik27ktta4f7igkxkq5e5qnew6fgxeywz6poput7jfliz526v4
-  clients/base.py: bafybeih5ahf7sgjmau2vuq3zatady7w535m3orxiagoam53taruieaofsy
-  clients/httpx.py: bafybeiax7h6sezkjeycy6dhfrbav3qasbyfgxoewuum62heaucp6lfqine
-  clients/requests.py: bafybeigfg7dasizaljozy24tb2czpeiihfvsynuixfldahtqa4lkiwnmze
+  clients/base.py: bafybeibew7pzzlqs3q26ivae4qr35dmw3tnvb4gt676iimogvlzz27h3ee
+  clients/httpx.py: bafybeibulk73mm35tgvm67a6ui57353jxqhx5u3bwbtmtmb5z5ffkfsqau
+  clients/requests.py: bafybeif4jh2m6jm4u7sj2bvam3esjzt4eduo5iqwdggvciqprhqlwieevu
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
