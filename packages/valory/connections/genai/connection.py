@@ -25,6 +25,7 @@ import pickle  # nosec
 from typing import Any, Dict, Tuple, cast
 
 import google.generativeai as genai  # type: ignore
+import requests  # type: ignore[import-untyped]
 from aea.configurations.base import PublicId
 from aea.connections.base import BaseSyncConnection
 from aea.mail.base import Envelope
@@ -33,7 +34,10 @@ from aea.protocols.dialogue.base import Dialogue
 from eth_account import Account
 
 from packages.valory.connections.genai.utils import pydantic_to_gemini_schema
-from packages.valory.connections.x402.clients.base import decode_x_payment_response
+from packages.valory.connections.x402.clients.base import (
+    PaymentError,
+    decode_x_payment_response,
+)
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
@@ -212,41 +216,52 @@ class GenaiConnection(BaseSyncConnection):
             "contents": [{"parts": [{"text": payload["prompt"]}]}],
         }
 
-        if generation_config_kwargs["response_schema"] is not None:
-            schema = pydantic_to_gemini_schema(
-                generation_config_kwargs["response_schema"]
-            )
-            data["generationConfig"] = {
-                "response_mime_type": generation_config_kwargs["response_mime_type"],
-                "response_json_schema": schema,
-            }
+        generation_config: Dict[str, Any] = {}
+        if "temperature" in generation_config_kwargs:
+            generation_config["temperature"] = generation_config_kwargs["temperature"]
+        response_schema = generation_config_kwargs.get("response_schema")
+        response_mime_type = generation_config_kwargs.get("response_mime_type")
+        if response_schema is not None or response_mime_type is not None:
+            mime_type = response_mime_type
+            if mime_type is None and response_schema is not None:
+                mime_type = "application/json"
+            if mime_type is not None:
+                generation_config["response_mime_type"] = mime_type
+            if response_schema is not None:
+                generation_config["response_json_schema"] = pydantic_to_gemini_schema(
+                    response_schema
+                )
+        if generation_config:
+            data["generationConfig"] = generation_config
         response = session.post(
             url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
         )
 
-        result = response.json()
+        try:
+            response.raise_for_status()
+            result = response.json()
+        except requests.exceptions.HTTPError as exc:
+            raise PaymentError(f"x402 upstream returned HTTP error: {exc}") from exc
+        except ValueError as exc:
+            raise PaymentError(f"x402 upstream returned non-JSON body: {exc}") from exc
 
         if "error" in result:
             raise ValueError(f"Genai API error: {result['error']}")
 
-        # Check for payment response header
         if "X-Payment-Response" in response.headers:
             payment_response = decode_x_payment_response(
                 response.headers["X-Payment-Response"]
             )
             self.logger.info(
-                f"Payment response transaction hash: {payment_response['transaction']}"
+                "Payment response transaction hash: "
+                f"{payment_response.get('transaction', '<missing>')}"
             )
         else:
             self.logger.warning("Warning: No payment response header found")
 
-        # Extract text response
-        text = (
-            result.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
+        candidates = result.get("candidates") or [{}]
+        parts = candidates[0].get("content", {}).get("parts") or [{}]
+        text = parts[0].get("text", "")
         if text == "":
             raise ValueError("Empty response from Genai API")
 
@@ -316,6 +331,8 @@ class GenaiConnection(BaseSyncConnection):
                 )
                 response_text = response.text  # type: ignore
                 error = False
+        except PaymentError as e:
+            return {"error": f"x402 payment adapter error: {e}"}, True
         except Exception as e:  # pylint: disable=broad-except
             return {"error": f"Exception while calling Genai: {e}"}, True
 
@@ -324,7 +341,7 @@ class GenaiConnection(BaseSyncConnection):
 
     def on_connect(self) -> None:
         """
-        Tear down the connection.
+        Set up the connection.
 
         Connection status set automatically.
         """

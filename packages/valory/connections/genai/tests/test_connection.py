@@ -18,36 +18,25 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Tests for the Genai connection.
-
-The default-timeout test for x402 also lives in this file because the
-upstream-shape ``packages/valory/connections/x402`` directory is excluded
-from this repo's pytest collection (see ``[tool.tomte] pytest_targets_exclude``
-in pyproject.toml). The Valory-specific timeout injection is asserted here
-where it is collected by the test matrix.
-"""
+"""Tests for the Genai connection."""
 
 # pylint: disable=protected-access
 
-import datetime
+import base64
+import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import google.api_core.exceptions
 import pytest
-import requests
-from eth_account import Account
 
 from packages.valory.connections.genai import connection as genai_connection
 from packages.valory.connections.genai.connection import (
     GENAI_DIRECT_TIMEOUT_SECONDS,
     GenaiConnection,
 )
-from packages.valory.connections.x402.clients.requests import (
-    DEFAULT_X402_TIMEOUT,
-    x402_requests,
-)
+from packages.valory.connections.x402.clients.base import PaymentError
 
 
 def _make_stub_for_get_response(use_x402: bool = False) -> Any:
@@ -147,66 +136,329 @@ class TestGenerateContentDeadline:
         assert "Deadline Exceeded" in body["error"]
 
 
-def _fake_super_send(_self_inner: object, _request: object, **kwargs: object) -> object:
-    """Capture-friendly stand-in for ``HTTPAdapter.send``."""
-    response = MagicMock()
-    response.status_code = 200
-    response.headers = {}
-    response.cookies = {}
-    response.is_redirect = False
-    response.is_permanent_redirect = False
-    response.history = []
-    response.url = "http://example.com/"
-    response.elapsed = datetime.timedelta(seconds=0)
-    response._captured = kwargs  # exposed for the test to read back
-    return response
+class TestProcessX402RequestPaymentResponseHeader:
+    """Tests for ``_process_x402_request``."""
 
+    def _make_x402_stub(self) -> Any:
+        """Build a stub with the attributes ``_process_x402_request`` reads."""
+        return SimpleNamespace(
+            use_x402=True,
+            logger=MagicMock(),
+            genai_x402_server_base_url="http://x402.example.com",
+            connection_private_key=(
+                "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+            ),
+            _eoa_account=MagicMock(),  # x402_requests is monkeypatched away
+        )
 
-class TestX402DefaultTimeout:
-    """Tests covering the default timeout injection on the x402 adapter."""
+    def test_payment_header_missing_transaction_does_not_break_response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing ``transaction`` key in the payment header is tolerated.
 
-    def test_default_timeout_is_injected_when_caller_omits(self) -> None:
-        """``Session.request`` without a timeout reaches the adapter as the default."""
-        session = x402_requests(Account.create())
-        captured: dict = {}
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
 
-        def capturing_send(
-            _self_inner: object, request: object, **kwargs: object
-        ) -> object:
-            captured.update(kwargs)
-            return _fake_super_send(_self_inner, request, **kwargs)
+        encoded_header_without_tx = base64.b64encode(
+            json.dumps({"success": True, "network": "base"}).encode("utf-8")
+        ).decode("utf-8")
 
-        with patch.object(
-            requests.adapters.HTTPAdapter,
-            "send",
-            autospec=True,
-            side_effect=capturing_send,
-        ):
-            session.request("GET", "http://example.com/")
-        assert captured["timeout"] == DEFAULT_X402_TIMEOUT
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "hello"}]}}]
+        }
+        fake_response.headers = {"X-Payment-Response": encoded_header_without_tx}
 
-    def test_explicit_caller_timeout_is_preserved(self) -> None:
-        """An explicit caller timeout flows through to the adapter unchanged."""
-        session = x402_requests(Account.create())
-        captured: dict = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
 
-        def capturing_send(
-            _self_inner: object, request: object, **kwargs: object
-        ) -> object:
-            captured.update(kwargs)
-            return _fake_super_send(_self_inner, request, **kwargs)
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "hi"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={"response_schema": None},
+        )
+        assert error is False
+        assert text == "hello"
 
-        with patch.object(
-            requests.adapters.HTTPAdapter,
-            "send",
-            autospec=True,
-            side_effect=capturing_send,
-        ):
-            session.request("GET", "http://example.com/", timeout=5)
-        assert captured["timeout"] == 5
+    def test_payment_error_is_labeled_as_payment_adapter_error(self) -> None:
+        """``PaymentError`` is surfaced under an x402 label, not as a Genai error."""
+        stub = self._make_x402_stub()
 
-    def test_custom_default_timeout_propagates(self) -> None:
-        """A caller-provided ``default_timeout`` is mounted on the adapter."""
-        session = x402_requests(Account.create(), default_timeout=(2.0, 7.0))
-        adapter = session.get_adapter("http://example.com/")
-        assert adapter._default_timeout == (2.0, 7.0)
+        def fake_process(*_a: Any, **_k: Any) -> Any:
+            raise PaymentError("Failed to handle payment: boom")
+
+        stub._process_x402_request = fake_process
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
+        assert error is True
+        assert "x402 payment adapter error" in body["error"]
+        assert "Genai" not in body["error"]
+
+    def test_plain_prompt_without_schema_reaches_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prompt-only payload reaches the upstream and forwards temperature.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+
+        gemini_text = "Plain prompt response from Gemini."
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": gemini_text}]}}]
+        }
+        fake_response.headers = {}  # no payment-response header
+
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        # ``self._process_x402_request`` resolves against the stub, not
+        # the class. Bind the real implementation with the stub as self.
+        stub._process_x402_request = (
+            lambda *a, **k: GenaiConnection._process_x402_request(stub, *a, **k)
+        )
+
+        body, error = GenaiConnection._get_response(
+            stub, '{"prompt": "hi", "temperature": 0.5}'
+        )
+        assert error is False
+        assert body == {"response": gemini_text}
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert sent_data["contents"] == [{"parts": [{"text": "hi"}]}]
+        assert sent_data["generationConfig"] == {"temperature": 0.5}
+
+    def test_schema_without_mime_type_defaults_to_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A schema with no mime-type defaults to ``application/json``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        from pydantic import BaseModel
+
+        class _Prediction(BaseModel):
+            confidence: float
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"confidence": 0.9}'}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "predict"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={"response_schema": _Prediction},
+        )
+        assert error is False
+        assert text == '{"confidence": 0.9}'
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert sent_data["generationConfig"]["response_mime_type"] == "application/json"
+        assert "response_json_schema" in sent_data["generationConfig"]
+
+    def test_custom_mime_type_with_schema_is_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller-provided mime-type survives alongside a schema.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        from pydantic import BaseModel
+
+        class _Prediction(BaseModel):
+            confidence: float
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "confidence=0.9"}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "predict"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={
+                "response_schema": _Prediction,
+                "response_mime_type": "text/plain",
+            },
+        )
+        assert error is False
+        assert text == "confidence=0.9"
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        gen_config = sent_data["generationConfig"]
+        # Pin the full shape: both keys present, mime-type is the
+        # caller's value, schema produced from the Pydantic class.
+        assert set(gen_config.keys()) == {
+            "response_mime_type",
+            "response_json_schema",
+        }
+        assert gen_config["response_mime_type"] == "text/plain"
+        assert gen_config["response_json_schema"] == _Prediction.model_json_schema()
+
+    def test_mime_type_without_schema_is_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mime-type without a schema reaches the upstream verbatim.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"x": 1}'}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "free-form JSON please"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={
+                "response_mime_type": "application/json",
+                "response_schema": None,
+            },
+        )
+        assert error is False
+        assert text == '{"x": 1}'
+
+        sent_data = json.loads(fake_session.post.call_args.kwargs["data"])
+        assert sent_data["generationConfig"] == {
+            "response_mime_type": "application/json"
+        }
+        assert "response_json_schema" not in sent_data["generationConfig"]
+
+    def test_upstream_http_error_raises_payment_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-2xx response surfaces as ``PaymentError``, not a Genai error.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        import requests as _requests
+
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.side_effect = _requests.exceptions.HTTPError(
+            "500 Server Error"
+        )
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(PaymentError, match="x402 upstream returned HTTP error"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_upstream_non_json_body_raises_payment_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 with a non-JSON body surfaces as ``PaymentError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.side_effect = ValueError("Expecting value")
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(PaymentError, match="x402 upstream returned non-JSON body"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_empty_candidates_does_not_index_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``candidates`` list raises ``ValueError``, not ``IndexError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"candidates": []}
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(ValueError, match="Empty response from Genai API"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+
+    def test_empty_parts_does_not_index_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``parts`` list raises ``ValueError``, not ``IndexError``.
+
+        :param monkeypatch: pytest fixture used to stub the x402 session.
+        """
+        stub = self._make_x402_stub()
+        fake_response = MagicMock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {"candidates": [{"content": {"parts": []}}]}
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "x402_requests", lambda *_a, **_k: fake_session
+        )
+
+        with pytest.raises(ValueError, match="Empty response from Genai API"):
+            GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )

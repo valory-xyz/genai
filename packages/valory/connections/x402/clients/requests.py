@@ -1,7 +1,9 @@
 # Adapted from https://github.com/coinbase/x402/tree/main/python/x402/src/x402
 
+import concurrent.futures
 import copy
 import json
+import logging
 from typing import Optional, Tuple, Union
 
 import requests
@@ -10,10 +12,14 @@ from requests.adapters import HTTPAdapter
 
 from packages.valory.connections.x402.clients.base import (
     PaymentError,
+    PaymentRejectedAfterRetryError,
     PaymentSelectorCallable,
     x402Client,
 )
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
+
+
+_logger = logging.getLogger(__name__)
 
 
 # (connect, read) seconds. Read is generous enough for image-bearing LLM
@@ -96,15 +102,28 @@ class x402HTTPAdapter(HTTPAdapter):
 
             retry_response = super().send(request, **kwargs)
 
+            if retry_response.status_code == 402:
+                _logger.warning(
+                    "x402 retry returned 402 after payment header was attached; "
+                    "upstream still rejects the request."
+                )
+                _logger.debug(
+                    "x402 retry body (truncated): %r", retry_response.content[:500]
+                )
+                raise PaymentRejectedAfterRetryError(
+                    status_code=retry_response.status_code,
+                    body=retry_response.content,
+                )
+
             # Copy the retry response data to the original response
             response.status_code = retry_response.status_code
             response.headers = retry_response.headers
             response._content = retry_response.content
             return response
 
-        except PaymentError as e:
+        except (PaymentError, concurrent.futures.CancelledError):
             self._is_retry = False
-            raise e
+            raise
         except Exception as e:
             self._is_retry = False
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e

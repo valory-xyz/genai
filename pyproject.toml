@@ -63,9 +63,6 @@ upstream_pins = []
 # from service_specific_packages so the canonical lint envs don't
 # walk it. Same reason its files are excluded from check-copyright.
 service_specific_packages_exclude = ["packages/valory/connections/x402"]
-# Likewise pytest_targets so the matrix env doesn't try to collect
-# upstream-shape tests inside x402.
-pytest_targets_exclude = ["packages/valory/connections/x402"]
 tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
 
 [tool.uv.build-backend]

@@ -9,14 +9,16 @@ fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeibzpik27ktta4f7igkxkq5e5qnew6fgxeywz6poput7jfliz526v4
-  clients/base.py: bafybeih5ahf7sgjmau2vuq3zatady7w535m3orxiagoam53taruieaofsy
-  clients/httpx.py: bafybeiax7h6sezkjeycy6dhfrbav3qasbyfgxoewuum62heaucp6lfqine
-  clients/requests.py: bafybeigfg7dasizaljozy24tb2czpeiihfvsynuixfldahtqa4lkiwnmze
+  clients/base.py: bafybeiby3gqwh2geyl4vlrkkyr464cg3xpfwsthdk3xflb7bum76abfn3q
+  clients/httpx.py: bafybeie7tqd5zmpclnnvm76zb3rmwn3yy3eth2o4usriwx7sjqqccb6mse
+  clients/requests.py: bafybeiczmshp5jv447qlhbichwwwavwd5cbaynxkrta2koqchgx7naheim
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
   exact.py: bafybeicd3d5iya5o27ekk7qvhnya54o3c3guq74h6v6ttcc4yoht4si7fy
   networks.py: bafybeieo34m7hjcbsjx4lhbtjjpqx3lg7m2crm2mnlcdn2tfttygxrdzsa
+  tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
+  tests/test_clients.py: bafybeighkb7unnvw3o4zv4pgtxma54rhdyhcrmotp6nkcuc6wbp4uscfqy
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
