@@ -11,12 +11,12 @@ readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
     # OA / open-aea / plugins — pinned exactly (framework contract).
-    "open-autonomy[all]==0.21.20",
-    "open-aea-ledger-ethereum==2.2.3",
-    "open-aea-ledger-cosmos==2.2.3",
-    "open-aea-test-autonomy==0.21.20",
-    "open-aea-cli-ipfs==2.2.3",
-    "open-aea-helpers==0.21.20",
+    "open-autonomy[all]==0.21.22",
+    "open-aea-ledger-ethereum==2.2.6",
+    "open-aea-ledger-cosmos==2.2.6",
+    "open-aea-test-autonomy==0.21.22",
+    "open-aea-cli-ipfs==2.2.6",
+    "open-aea-helpers==0.21.22",
     # Framework/lib deps — ranges (genai is a connection library, not an app).
     "requests>=2.32.5,<3",
     # grpcio: pinned exactly — tight ABI/wheel coupling with protobuf; upstream
