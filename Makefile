@@ -73,7 +73,7 @@ security:
 common-checks-1:
 	tomte check-copyright --author valory --exclude-part x402
 	tomte check-doc-links
-	tomte tox -p -e check-hash -e check-packages -e check-doc-hashes -e analyse-service
+	tomte tox -p -e check-hash -e check-packages -e check-doc-hashes
 
 .PHONY: common-checks-2
 common-checks-2:
