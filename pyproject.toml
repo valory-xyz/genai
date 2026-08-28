@@ -47,7 +47,7 @@ Repository = "https://github.com/valory-xyz/genai"
 [dependency-groups]
 dev = [
     "setuptools>=78.1.1,<82",
-    "tomte[tox, cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
+    "tomte[tox, cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.2",
 ]
 
 [tool.uv]
@@ -63,7 +63,7 @@ upstream_pins = []
 # from service_specific_packages so the canonical lint envs don't
 # walk it. Same reason its files are excluded from check-copyright.
 service_specific_packages_exclude = ["packages/valory/connections/x402"]
-tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.2"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

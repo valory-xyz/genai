@@ -16,14 +16,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-versions }}
+          python-version: ${{ matrix.python-version }}
       - uses: addnab/docker-run-action@v3
         with:
           image: valory/open-autonomy-user:0.21.26
           options: -v ${{ github.workspace }}:/work
           run: |
+            set -eu
             echo "Pushing Packages"
             cd /work
-            export AUTHOR=$(grep 'service' packages/packages.json | awk -F/ '{print $2}' | head -1)
-            autonomy init --reset --author $AUTHOR --ipfs --remote
+            AUTHOR="$(python3 -c 'import json; dev = json.load(open("packages/packages.json"))["dev"]; print(next(iter(dev)).split("/")[1] if dev else "")')"
+            if [ -z "$AUTHOR" ]; then
+              echo "Could not determine package author from packages/packages.json" >&2
+              exit 1
+            fi
+            autonomy init --reset --author "$AUTHOR" --ipfs --remote
             autonomy push-all
