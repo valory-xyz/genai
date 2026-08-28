@@ -1,8 +1,15 @@
 # genai
 
 Open Autonomy connection and protocol packages (Gemini, OpenAI, x402).
-`packages/packages.json` holds two protocols and three connections — there are no
+`packages/packages.json` holds protocols and connections only — there are no
 agent or service packages here.
+
+**Keep this file current.** If you hit a trap here that cost you time — a command
+that does not behave as documented, a check that fails for reasons unrelated to
+your change, a local failure CI never sees — add it below before you finish. The
+next agent has no memory of your run. Keep entries to durable facts about this
+repo; leave version-specific mechanics to the commit and PR that changed them,
+where `git blame` can still reach them.
 
 ## Environment
 
@@ -32,7 +39,7 @@ move together, plus the lockfile:
 | Where | What |
 |---|---|
 | `pyproject.toml` | the `dev` dependency, and `[tool.tomte] tomte_dep_pin` |
-| `.github/workflows/common_checks.yaml` | six `pip install 'tomte[tox,cli] @ git+…'` lines |
+| `.github/workflows/common_checks.yaml` | every `pip install 'tomte[tox,cli] @ git+…'` line |
 | `uv.lock` | regenerate with `uv lock` |
 
 The CI `pip install` is the driver that renders the tox config; `tomte_dep_pin`
@@ -62,15 +69,19 @@ After touching anything under `packages/`, run `make generators` — it calls
 
 ## Repo-specific traps
 
-- **`check-generate-all-protocols`** shows up in `tomte tox -l`, is run by no
-  Valory repo, and must not be added. Regenerating strips the copyright headers
-  that `tomte check-copyright --author valory` then demands, and the generator
-  stamps the current year, so it would go red every 1 January. It also needs
-  `protoc` and `protolint`, which no CI installs.
+- **Do not add `check-generate-all-protocols`, and do not run a bare `tomte tox`
+  with no `-e`** — the env sits in tomte's default envlist. It rewrites the
+  protocol files in place *before* checking them, so running it leaves your
+  working tree dirty, and its output cannot satisfy `check-copyright`. It was
+  investigated and rejected; the reasoning is in the git history.
 - **`packages/valory/connections/x402`** is adapted from coinbase/x402 and is
   deliberately held outside the lint, type-hint and copyright surface — see
   `service_specific_packages_exclude`, `--exclude-part x402`, and
   `[mypy-packages.valory.connections.x402.*]`. Leave its lint alone.
 - **No service packages**, so anything keyed off one is a no-op or a trap here.
-  tomte's `analyse-service` env was one; the release workflow's `--author`
-  derivation was another.
+- **`release.yaml`'s `set -eu` and its `--author` derivation are deliberate and
+  interdependent.** The derivation has to yield a valid author handle or
+  `autonomy init` fails, and `set -e` is what stops such a failure being masked
+  by the command after it. Do not "simplify" either, and do not swap `-eu` for
+  `-euo pipefail` — the action runs `sh`, and there are no pipelines in that
+  block. The reasoning is in the PR that introduced them.
