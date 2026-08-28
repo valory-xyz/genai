@@ -25,9 +25,9 @@ jobs:
             set -eu
             echo "Pushing Packages"
             cd /work
-            AUTHOR=$(awk -F/ '/"third_party"/{exit} /"(agent|connection|contract|protocol|service|skill)\//{print $2; exit}' packages/packages.json)
+            AUTHOR="$(python3 -c 'import json; dev = json.load(open("packages/packages.json"))["dev"]; print(next(iter(dev)).split("/")[1] if dev else "")')"
             if [ -z "$AUTHOR" ]; then
-              echo "Could not derive an author from packages/packages.json" >&2
+              echo "Could not determine package author from packages/packages.json" >&2
               exit 1
             fi
             autonomy init --reset --author "$AUTHOR" --ipfs --remote
