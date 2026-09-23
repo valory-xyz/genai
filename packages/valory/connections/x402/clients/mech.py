@@ -19,27 +19,9 @@
 
 """A ``requests`` session that pays for calls through the mech marketplace.
 
-Drop-in sibling of ``x402_requests``. The caller keeps posting to
-``{facilitator_base_url}{upstream_path}`` exactly as it does with the
-x402 proxy; the adapter turns each request into a Safe-signed
-marketplace request and posts it to the facilitator's
-``/mech/{api}/{chain}`` route, which forwards the call upstream and
-settles it later in a batch.
-
-Per request the adapter:
-
-1. asks the facilitator for the requester's current parameters
-   (contracts, delivery rate, next nonce, balance), so the agent carries
-   no chain configuration and no RPC of its own;
-2. builds the canonical bytes of the call with an ``expires_at``,
-   derives the marketplace request_id and signs its Safe-message wrap
-   with the agent EOA, the Safe's sole owner;
-3. posts the signed body and returns the upstream response as-is.
-
-A nonce collision (another in-flight call from the same Safe) is a 409
-that names the slot to use; the adapter re-signs at that slot and
-retries a bounded number of times. A 402 raises
-``MechDepositRequiredError`` so the caller can trigger a top-up.
+Drop-in sibling of ``x402_requests``: the caller posts to
+``{facilitator_base_url}{upstream_path}`` and the adapter turns each
+call into a Safe-signed marketplace request on ``/mech/{api}/{chain}``.
 """
 
 import base64
@@ -47,6 +29,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional, Tuple, Union
 from urllib.parse import parse_qsl, urlsplit
 
@@ -55,7 +38,6 @@ from eth_account import Account
 from requests.adapters import HTTPAdapter
 
 from packages.valory.connections.x402.clients.base import PaymentError
-from packages.valory.connections.x402.clients.requests import DEFAULT_X402_TIMEOUT
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
     compute_safe_message_hash,
@@ -64,10 +46,15 @@ from packages.valory.connections.x402.mech_signing import (
 
 _logger = logging.getLogger(__name__)
 
-# Well under the facilitator's default cap (300s); the request is served
-# within seconds, the deadline only bounds replay of a captured body.
+# The deadline only bounds replay of a captured body; the facilitator
+# clamps it to its own cap.
 DEFAULT_REQUEST_TTL_SECS = 120
 DEFAULT_NONCE_RETRIES = 2
+# The facilitator bounds one upstream call by its MECH_UPSTREAM_TIMEOUT_SECS
+# (120s by default) and does RPC reads before that. The read timeout must
+# outlast it: a call the client abandons is still served, charged and
+# settled on the facilitator's side.
+DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, 150.0)
 
 _NONCE_MISMATCH = "nonce_mismatch"
 
@@ -129,16 +116,23 @@ class RequesterInfo:
     balance: int
     available: int
     max_ttl_secs: int
+    # Facilitator clock (unix seconds) from the response's Date header, so
+    # expires_at is not hostage to the agent's clock; None when absent.
+    server_time: Optional[int] = None
 
     @classmethod
-    def from_json(cls, data: Dict[str, Any]) -> "RequesterInfo":
+    def from_json(
+        cls, data: Dict[str, Any], *, server_time: Optional[int] = None
+    ) -> "RequesterInfo":
         """Build from the facilitator's JSON body.
 
         :param data: decoded response body.
+        :param server_time: the facilitator's clock at the time of the response.
         :return: the parsed info.
         """
         payment_type = str(data["payment_type"])
         return cls(
+            server_time=server_time,
             chain_id=int(data["chain_id"]),
             marketplace_address=str(data["marketplace_address"]),
             mech_address=str(data["mech_address"]),
@@ -149,6 +143,17 @@ class RequesterInfo:
             available=int(data["available"]),
             max_ttl_secs=int(data["max_ttl_secs"]),
         )
+
+
+def _server_time(response: requests.Response) -> Optional[int]:
+    """Return the ``Date`` header as unix seconds, or ``None`` if absent or malformed."""
+    raw = response.headers.get("Date")
+    if not raw:
+        return None
+    try:
+        return int(parsedate_to_datetime(raw).timestamp())
+    except (TypeError, ValueError):
+        return None
 
 
 def _facilitator_error(response: requests.Response) -> Optional[Tuple[str, str, Dict]]:
@@ -190,7 +195,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         max_delivery_rate: Optional[int] = None,
         ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
         nonce_retries: int = DEFAULT_NONCE_RETRIES,
-        default_timeout: Union[float, Tuple[float, float]] = DEFAULT_X402_TIMEOUT,
+        default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
         **kwargs: Any,
     ) -> None:
         """Initialise the adapter.
@@ -209,7 +214,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         super().__init__(**kwargs)
         self.account = account
         self.safe_address = safe_address
-        self.chain = chain
+        self.chain = chain.lower()
         self.api = api
         self.facilitator_base_url = facilitator_base_url.rstrip("/")
         self.max_delivery_rate = max_delivery_rate
@@ -217,8 +222,6 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.nonce_retries = nonce_retries
         self._default_timeout = default_timeout
         self._origin = urlsplit(self.facilitator_base_url)
-
-    # ---------- request assembly -------------------------------------------
 
     def _upstream_call(self, request: requests.PreparedRequest) -> Dict[str, Any]:
         parts = urlsplit(str(request.url))
@@ -249,7 +252,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             raise MechRequestRejectedError(
                 status_code=response.status_code, error=error, detail=detail
             )
-        return RequesterInfo.from_json(response.json())
+        return RequesterInfo.from_json(
+            response.json(), server_time=_server_time(response)
+        )
 
     def _signed_body(
         self, call: Dict[str, Any], info: RequesterInfo, nonce: int
@@ -265,7 +270,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             raise MechRateExceededError(
                 f"delivery rate {rate} exceeds cap {self.max_delivery_rate}"
             )
-        expires_at = int(time.time()) + min(self.ttl_secs, info.max_ttl_secs)
+        now = info.server_time if info.server_time is not None else int(time.time())
+        expires_at = now + min(self.ttl_secs, info.max_ttl_secs)
         data = canonical_request_data(
             method=call["method"],
             path=call["path"],
@@ -294,7 +300,24 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             "upstream": call,
         }
 
-    # ---------- send -------------------------------------------------------
+    def _post_signed(
+        self, prepared: requests.PreparedRequest, **kwargs: Any
+    ) -> requests.Response:
+        """Post a signed body; on a read timeout, ask once more for the same body.
+
+        The facilitator may have served and charged the call the client
+        stopped waiting for; the same request_id is answered from its
+        stored response, so the retry collects it instead of paying again.
+
+        :param prepared: the signed POST.
+        :param kwargs: adapter send arguments.
+        :return: the facilitator's response.
+        """
+        try:
+            return super().send(prepared, **kwargs)
+        except requests.exceptions.Timeout:
+            _logger.warning("mech request timed out; asking for the stored response")
+            return super().send(prepared, **kwargs)
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         """Sign the call for the marketplace and post it to the facilitator.
@@ -319,14 +342,12 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 headers={"Content-Type": "application/json"},
                 data=json.dumps(body),
             ).prepare()
-            response = super().send(prepared, **kwargs)
+            response = self._post_signed(prepared, **kwargs)
             if 200 <= response.status_code < 300:
                 return response
 
             parsed = _facilitator_error(response)
             if parsed is None:
-                # An upstream answer passed through unchanged (e.g. a 429
-                # from CoinGecko); the caller handles it as it does today.
                 return response
             error, detail, context = parsed
             if response.status_code == 402:
@@ -365,7 +386,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
     facilitator_base_url: str,
     max_delivery_rate: Optional[int] = None,
     ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
-    default_timeout: Union[float, Tuple[float, float]] = DEFAULT_X402_TIMEOUT,
+    default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
     **kwargs: Any,
 ) -> requests.Session:
     """Create a requests session that pays for calls through the mech marketplace.

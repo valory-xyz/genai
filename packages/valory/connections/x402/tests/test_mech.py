@@ -23,6 +23,7 @@
 
 import base64
 import json
+import time
 from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import patch
 
@@ -33,6 +34,7 @@ from eth_utils import keccak, to_checksum_address
 
 from packages.valory.connections.x402.clients.base import PaymentError
 from packages.valory.connections.x402.clients.mech import (
+    DEFAULT_MECH_TIMEOUT,
     DEFAULT_REQUEST_TTL_SECS,
     MechDepositRequiredError,
     MechRateExceededError,
@@ -40,7 +42,6 @@ from packages.valory.connections.x402.clients.mech import (
     RequesterInfo,
     mech_requests,
 )
-from packages.valory.connections.x402.clients.requests import DEFAULT_X402_TIMEOUT
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
     compute_domain_separator,
@@ -191,10 +192,11 @@ def _json_response(status: int, payload: Any) -> requests.Response:
 class _FakeFacilitator:
     """Scripted responses per (method, path), recording every call."""
 
-    def __init__(self, post_responses: List[requests.Response]) -> None:
+    def __init__(self, post_responses: List[Any]) -> None:
         self.calls: List[Dict[str, Any]] = []
         self._posts = list(post_responses)
         self.info = dict(_INFO_JSON)
+        self.info_headers: Dict[str, str] = {"content-type": "application/json"}
 
     def send(self, _adapter: Any, request: requests.PreparedRequest, **kwargs: Any):
         self.calls.append(
@@ -206,22 +208,28 @@ class _FakeFacilitator:
             }
         )
         if request.method == "GET":
-            return _json_response(200, self.info)
+            return _response(
+                200, json.dumps(self.info).encode("utf-8"), self.info_headers
+            )
         assert self._posts, "unexpected POST"
-        return self._posts.pop(0)
+        item = self._posts.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def _session_with(
     fake: _FakeFacilitator,  # pylint: disable=unused-argument
     account: Optional[Account] = None,
     api: str = _API,
+    chain: str = _CHAIN,
     **kwargs: Any,
 ) -> Callable[[], requests.Session]:
     def _make() -> requests.Session:
         return mech_requests(
             account or Account.create(),
             safe_address=_SAFE,
-            chain=_CHAIN,
+            chain=chain,
             api=api,
             facilitator_base_url=_FACILITATOR,
             **kwargs,
@@ -486,7 +494,7 @@ def test_default_timeout_is_injected_when_caller_omits() -> None:
     with _patched(fake):
         session.get(f"{_FACILITATOR}/x")
 
-    assert [c["timeout"] for c in fake.calls] == [DEFAULT_X402_TIMEOUT] * 2
+    assert [c["timeout"] for c in fake.calls] == [DEFAULT_MECH_TIMEOUT] * 2
 
 
 def test_explicit_timeout_is_preserved() -> None:
@@ -509,3 +517,72 @@ def test_requester_info_parses_hex_payment_type_and_ints() -> None:
     assert info.payment_type == bytes.fromhex(_INFO_JSON["payment_type"][2:])
     assert len(info.payment_type) == 32
     assert keccak(text="FixedPriceTokenUSDC") == info.payment_type
+
+
+def test_read_timeout_asks_once_more_for_the_same_request_id() -> None:
+    """A call the client stopped waiting for is collected, not paid for twice."""
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert _posted_body(fake, 0)["request_id"] == _posted_body(fake, 1)["request_id"]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
+
+
+def test_second_read_timeout_is_raised() -> None:
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            requests.exceptions.ReadTimeout("slow"),
+        ]
+    )
+    session = _session_with(fake)()
+
+    with _patched(fake), pytest.raises(requests.exceptions.ReadTimeout):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+
+def test_default_timeout_outlasts_the_facilitator_upstream_deadline() -> None:
+    """The facilitator serves and charges a call for up to its 120s deadline plus RPC reads."""
+    assert DEFAULT_MECH_TIMEOUT[1] > 120
+
+
+def test_expires_at_follows_the_facilitator_clock() -> None:
+    """The Date header on the info response, not the agent clock, anchors expires_at."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    fake.info_headers["Date"] = "Wed, 01 Jan 2031 00:00:00 GMT"
+    server_now = 1_924_992_000  # the header above, in unix seconds
+    session = _session_with(fake, ttl_secs=60)()
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert _posted_body(fake)["expires_at"] == server_now + 60
+
+
+def test_malformed_date_header_falls_back_to_the_local_clock() -> None:
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    fake.info_headers["Date"] = "not a date"
+    session = _session_with(fake, ttl_secs=60)()
+    before = int(time.time())
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert before + 60 <= _posted_body(fake)["expires_at"] <= int(time.time()) + 60
+
+
+def test_chain_slug_is_lowercased_on_the_wire() -> None:
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake, chain="Optimism")()
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert fake.calls[0]["url"].startswith(f"{_FACILITATOR}/mech/optimism/requester/")
+    assert fake.calls[1]["url"] == f"{_FACILITATOR}/mech/{_API}/optimism"

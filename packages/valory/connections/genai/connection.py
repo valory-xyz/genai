@@ -61,9 +61,7 @@ REQUIRED_PROPERTIES_IN_PAYLOAD = ["prompt"]
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 GENERATE_ENDPOINT = "generateContent"
-# The Gemini REST API version the facilitator forwards to; the mech path
-# posts to {facilitator}{GEMINI_UPSTREAM_PREFIX}/models/... so the
-# facilitator sees the same upstream path the x402 proxy did.
+# Gemini REST prefix the facilitator forwards to, same as the x402 proxy.
 GEMINI_UPSTREAM_PREFIX = "/v1beta"
 MECH_API = "chat"
 
@@ -103,6 +101,26 @@ class SrrDialogues(BaseSrrDialogues):
         )
 
 
+def _check_payment_flags(
+    logger: Any, use_x402: Any, use_mech_facilitator: bool
+) -> None:
+    """Warn when the mech flag is set but cannot take effect.
+
+    The mech path is a variant of the paid path, so ``use_mech_facilitator``
+    does nothing while ``use_x402`` is off: the connection would call the
+    Gemini SDK directly with ``genai_api_key``.
+
+    :param logger: the connection logger.
+    :param use_x402: the ``use_x402`` config value.
+    :param use_mech_facilitator: the ``use_mech_facilitator`` config value.
+    """
+    if use_mech_facilitator and not use_x402:
+        logger.warning(
+            "use_mech_facilitator is set but use_x402 is off; the mech "
+            "facilitator is only used on the paid path, so this flag is ignored"
+        )
+
+
 class GenaiConnection(BaseSyncConnection):
     """Proxy to the functionality of the Genai library."""
 
@@ -134,12 +152,11 @@ class GenaiConnection(BaseSyncConnection):
         self.genai_x402_server_base_url = self.configuration.config.get(
             "genai_x402_server_base_url"
         )
-        # Mech-marketplace path: pays through the facilitator's /mech routes
-        # with a Safe-signed request instead of an x402 EIP-3009 transfer.
         # Only consulted when use_x402 is on.
         self.use_mech_facilitator = bool(
             self.configuration.config.get("use_mech_facilitator", False)
         )
+        _check_payment_flags(self.logger, self.use_x402, self.use_mech_facilitator)
         self.mech_facilitator_base_url = self.configuration.config.get(
             "mech_facilitator_base_url"
         )
@@ -226,11 +243,7 @@ class GenaiConnection(BaseSyncConnection):
         return Account.from_key(private_key=self.connection_private_key)
 
     def _paid_session_and_base_url(self) -> Tuple[requests.Session, str]:
-        """Return the paid session and the base URL to build Gemini paths on.
-
-        With ``use_mech_facilitator`` the session signs mech-marketplace
-        requests against the facilitator origin; otherwise it is the x402
-        session against the x402 proxy, unchanged.
+        """Return the paid session (mech or x402) and the base URL for Gemini paths.
 
         :return: the session and the base URL.
         """
@@ -238,8 +251,11 @@ class GenaiConnection(BaseSyncConnection):
             return x402_requests(self._eoa_account), str(
                 self.genai_x402_server_base_url
             )
-        chain = str(self.mech_chain)
-        safe_address = self.mech_safe_addresses.get(chain)
+        chain = str(self.mech_chain).lower()
+        safe_address = next(
+            (v for k, v in self.mech_safe_addresses.items() if str(k).lower() == chain),
+            None,
+        )
         if not safe_address or not self.mech_facilitator_base_url:
             raise PaymentError(
                 "mech facilitator enabled but mech_facilitator_base_url or the "

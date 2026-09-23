@@ -17,23 +17,11 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Hashing primitives shared with the mech facilitator and the marketplace.
+"""Byte-exact mirrors of the facilitator's canonical bytes, ``MechMarketplace.getRequestId`` and the Safe message wrap.
 
-Three byte-exact mirrors live here:
-
-* ``canonical_request_data``: the bytes the facilitator commits into the
-  marketplace ``requestData`` for an HTTP call. Same key order, separators
-  and escaping as ``mech_facilitator/canonical.py`` in x402-poc.
-* ``derive_request_id``: ``MechMarketplace.getRequestId``. A copy of the
-  mech_interact skill's implementation (a connection cannot import a
-  skill), pinned by the same golden vector in the tests.
-* ``compute_safe_message_hash``: the Safe ``CompatibilityFallbackHandler``
-  wrap the marketplace applies before ``isValidSignature`` on a Safe
-  requester (Safe >= 1.3.0).
-
-If any of the three drifts, the facilitator rejects the request_id (400)
-or the marketplace recovers the wrong signer at settlement, so change
-them only together with their counterparts.
+Change them only together with their counterparts (x402-poc
+``mech_facilitator/canonical.py`` and ``request_id.py``, the
+mech_interact skill); the tests pin the shared golden vectors.
 """
 
 import json
@@ -89,8 +77,7 @@ def compute_domain_separator(chain_id: int, marketplace_address: str) -> bytes:
     """Reproduce ``MechMarketplace._computeDomainSeparator``.
 
     The contract hashes the version through ``abi.encode`` rather than
-    as raw bytes (``MechMarketplace.sol:160``), so the Python side
-    encodes the version string the same way.
+    as raw bytes, so the Python side encodes the version the same way.
 
     :param chain_id: the settlement chain id.
     :param marketplace_address: the marketplace contract address.

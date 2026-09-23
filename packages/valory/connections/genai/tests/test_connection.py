@@ -548,6 +548,42 @@ class TestMechFacilitatorPath:
         with pytest.raises(PaymentError):
             stub._paid_session_and_base_url()
 
+    @pytest.mark.parametrize("safe_key", ["optimism", "OPTIMISM"])
+    def test_flag_on_matches_the_chain_slug_case_insensitively(
+        self, monkeypatch: pytest.MonkeyPatch, safe_key: str
+    ) -> None:
+        """A mixed-case slug or Safe-map key still resolves and reaches the wire lowercase."""
+        stub = self._stub(
+            use_mech_facilitator=True,
+            mech_chain="Optimism",
+            mech_safe_addresses={safe_key: "0x" + "11" * 20},
+        )
+        seen: dict = {}
+        monkeypatch.setattr(
+            genai_connection,
+            "mech_requests",
+            lambda _account, **kwargs: seen.update(kwargs) or "mech-session",
+        )
+
+        stub._paid_session_and_base_url()
+
+        assert seen["chain"] == "optimism"
+        assert seen["safe_address"] == "0x" + "11" * 20
+
+    @pytest.mark.parametrize(
+        ("use_x402", "use_mech", "warns"),
+        [(False, True, True), (True, True, False), (False, False, False)],
+    )
+    def test_mech_flag_without_x402_is_flagged_at_construction(
+        self, use_x402: bool, use_mech: bool, warns: bool
+    ) -> None:
+        """The mech flag only acts on the paid path; setting it alone is a misconfiguration."""
+        logger = MagicMock()
+
+        genai_connection._check_payment_flags(logger, use_x402, use_mech)
+
+        assert logger.warning.called is warns
+
     def test_mech_path_does_not_warn_about_a_missing_payment_header(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
