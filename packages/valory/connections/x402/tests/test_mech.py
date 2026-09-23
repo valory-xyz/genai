@@ -32,6 +32,7 @@ import requests
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
+from packages.valory.connections.x402.clients import mech as mech_module
 from packages.valory.connections.x402.clients.base import PaymentError
 from packages.valory.connections.x402.clients.mech import (
     DEFAULT_MECH_TIMEOUT,
@@ -586,3 +587,52 @@ def test_chain_slug_is_lowercased_on_the_wire() -> None:
 
     assert fake.calls[0]["url"].startswith(f"{_FACILITATOR}/mech/optimism/requester/")
     assert fake.calls[1]["url"] == f"{_FACILITATOR}/mech/{_API}/optimism"
+
+
+def test_in_progress_after_a_timeout_is_waited_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry may find the original still finishing; Retry-After is honoured until it lands."""
+    in_progress = _json_response(
+        409,
+        {"detail": {"error": "request_in_progress", "detail": "busy", "context": {}}},
+    )
+    in_progress.headers["Retry-After"] = "1"
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            in_progress,
+            in_progress,
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    session = _session_with(fake)()
+    slept: List[float] = []
+    monkeypatch.setattr(mech_module.time, "sleep", slept.append)
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert slept == [1.0, 1.0]
+    request_ids = {_posted_body(fake, i)["request_id"] for i in range(4)}
+    assert len(request_ids) == 1
+
+
+def test_in_progress_that_never_clears_is_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    in_progress = _json_response(
+        409,
+        {"detail": {"error": "request_in_progress", "detail": "busy", "context": {}}},
+    )
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow")] + [in_progress] * 4
+    )
+    session = _session_with(fake)()
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+
+    with _patched(fake), pytest.raises(MechRequestRejectedError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert excinfo.value.error == "request_in_progress"

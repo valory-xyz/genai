@@ -104,11 +104,7 @@ class SrrDialogues(BaseSrrDialogues):
 def _check_payment_flags(
     logger: Any, use_x402: Any, use_mech_facilitator: bool
 ) -> None:
-    """Warn when the mech flag is set but cannot take effect.
-
-    The mech path is a variant of the paid path, so ``use_mech_facilitator``
-    does nothing while ``use_x402`` is off: the connection would call the
-    Gemini SDK directly with ``genai_api_key``.
+    """Warn when ``use_mech_facilitator`` is set without ``use_x402``, where it has no effect.
 
     :param logger: the connection logger.
     :param use_x402: the ``use_x402`` config value.

@@ -50,13 +50,13 @@ _logger = logging.getLogger(__name__)
 # clamps it to its own cap.
 DEFAULT_REQUEST_TTL_SECS = 120
 DEFAULT_NONCE_RETRIES = 2
-# The facilitator bounds one upstream call by its MECH_UPSTREAM_TIMEOUT_SECS
-# (120s by default) and does RPC reads before that. The read timeout must
-# outlast it: a call the client abandons is still served, charged and
-# settled on the facilitator's side.
+# Must outlast the facilitator's upstream deadline (120s): an abandoned call is still charged.
 DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, 150.0)
+# How many times to wait out a 409 request_in_progress after a timeout.
+DEFAULT_IN_PROGRESS_RETRIES = 3
 
 _NONCE_MISMATCH = "nonce_mismatch"
+_IN_PROGRESS = "request_in_progress"
 
 
 class MechDepositRequiredError(PaymentError):
@@ -154,6 +154,15 @@ def _server_time(response: requests.Response) -> Optional[int]:
         return int(parsedate_to_datetime(raw).timestamp())
     except (TypeError, ValueError):
         return None
+
+
+def _retry_after_secs(response: requests.Response, *, cap: float = 10.0) -> float:
+    """Return the ``Retry-After`` header in seconds, bounded to ``[1, cap]``."""
+    try:
+        wait = float(response.headers.get("Retry-After", "1"))
+    except ValueError:
+        wait = 1.0
+    return max(1.0, min(cap, wait))
 
 
 def _facilitator_error(response: requests.Response) -> Optional[Tuple[str, str, Dict]]:
@@ -303,11 +312,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
     def _post_signed(
         self, prepared: requests.PreparedRequest, **kwargs: Any
     ) -> requests.Response:
-        """Post a signed body; on a read timeout, ask once more for the same body.
-
-        The facilitator may have served and charged the call the client
-        stopped waiting for; the same request_id is answered from its
-        stored response, so the retry collects it instead of paying again.
+        """Post a signed body; after a read timeout, collect the stored response for the same body.
 
         :param prepared: the signed POST.
         :param kwargs: adapter send arguments.
@@ -317,7 +322,20 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             return super().send(prepared, **kwargs)
         except requests.exceptions.Timeout:
             _logger.warning("mech request timed out; asking for the stored response")
-            return super().send(prepared, **kwargs)
+        response = super().send(prepared, **kwargs)
+        # The original may still be finishing on the facilitator; it says
+        # when to ask again.
+        for _ in range(DEFAULT_IN_PROGRESS_RETRIES):
+            parsed = _facilitator_error(response)
+            if (
+                response.status_code != 409
+                or parsed is None
+                or parsed[0] != _IN_PROGRESS
+            ):
+                break
+            time.sleep(_retry_after_secs(response))
+            response = super().send(prepared, **kwargs)
+        return response
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         """Sign the call for the marketplace and post it to the facilitator.
