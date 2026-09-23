@@ -6,6 +6,7 @@ import asyncio
 import base64
 import datetime
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ import requests
 from eth_account import Account
 
 from packages.valory.connections.x402.clients.base import (
+    REJECTION_BODY_LOG_LIMIT,
     PaymentError,
     PaymentRejectedAfterRetryError,
     PaymentResponseDecodeError,
@@ -44,6 +46,140 @@ def _fake_super_send(_self_inner: object, _request: object, **kwargs: object) ->
     response.elapsed = datetime.timedelta(seconds=0)
     response._captured = kwargs  # exposed for the test to read back
     return response
+
+
+EXPECTED_REJECTION_MESSAGE = (
+    "upstream rejected request with HTTP 402 after the payment header was "
+    "attached; the payment was not accepted"
+)
+
+# A well-formed x402 payment-required body: the gateway's own reason lives in
+# ``error`` and is what a support engineer needs out of a log bundle.
+DECODABLE_RETRY_BODY = (
+    b'{"x402Version": 1, "accepts": [], "error": "insufficient_funds: '
+    b'payer balance below maxAmountRequired"}'
+)
+GATEWAY_REASON = "insufficient_funds: payer balance below maxAmountRequired"
+X402_LOGGER_PREFIX = "packages.valory.connections.x402.clients"
+
+
+def _payment_required_body() -> bytes:
+    """Build the first-402 body both adapters parse before paying.
+
+    :return: the encoded payment-required response.
+    """
+    from packages.valory.connections.x402.types import (
+        PaymentRequirements,
+        x402PaymentRequiredResponse,
+    )
+
+    body = x402PaymentRequiredResponse(
+        x402_version=1,
+        accepts=[
+            PaymentRequirements(
+                scheme="exact",
+                network="base",
+                max_amount_required="1",
+                resource="http://example.com/",
+                description="t",
+                mime_type="application/json",
+                pay_to="0x0000000000000000000000000000000000000000",
+                max_timeout_seconds=60,
+                asset="0x0000000000000000000000000000000000000000",
+            )
+        ],
+        error="",
+    )
+    return json.dumps(body.model_dump(by_alias=True)).encode("utf-8")
+
+
+def _drive_requests_secondary_402(
+    monkeypatch: pytest.MonkeyPatch, retry_body: bytes
+) -> None:
+    """Drive the requests adapter through a 402-then-402 exchange.
+
+    :param monkeypatch: pytest fixture used to stub adapter internals.
+    :param retry_body: body the gateway returns on the paid retry.
+    """
+    from packages.valory.connections.x402.clients.requests import x402HTTPAdapter
+
+    session = x402_requests(Account.create())
+    adapter: x402HTTPAdapter = session.get_adapter("http://example.com/")
+
+    first = MagicMock()
+    first.status_code = 402
+    first.content = _payment_required_body()
+
+    retry = MagicMock()
+    retry.status_code = 402
+    retry.headers = {}
+    retry.content = retry_body
+
+    send_mock = MagicMock(side_effect=[first, retry])
+
+    def super_send(_self: object, _request: object, **kwargs: object) -> Any:
+        return send_mock(_self, _request, **kwargs)
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", super_send)
+    monkeypatch.setattr(
+        adapter.client, "create_payment_header", lambda *_a, **_k: "payment-header"
+    )
+
+    req = requests.Request("GET", "http://example.com/").prepare()
+    with pytest.raises(PaymentRejectedAfterRetryError):
+        adapter.send(req, timeout=5)
+
+
+def _drive_httpx_secondary_402(
+    monkeypatch: pytest.MonkeyPatch, retry_body: bytes
+) -> None:
+    """Drive the httpx adapter through a 402-then-402 exchange.
+
+    :param monkeypatch: pytest fixture used to stub the retry client.
+    :param retry_body: body the gateway returns on the paid retry.
+    """
+    hooks = HttpxHooks(MagicMock())
+
+    first_response = MagicMock(spec=httpx.Response)
+    first_response.status_code = 402
+    first_response.request = MagicMock(spec=httpx.Request)
+    first_response.request.headers = {}
+    first_response.aread = AsyncMock(return_value=None)
+    first_response.json.return_value = json.loads(_payment_required_body())
+    first_response.headers = {}
+    first_response._content = b""
+
+    retry_response = MagicMock(spec=httpx.Response)
+    retry_response.status_code = 402
+    retry_response.headers = {}
+    retry_response.content = retry_body
+
+    class _StubAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_StubAsyncClient":
+            return self
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+        async def send(self, _request: object) -> object:
+            return retry_response
+
+    monkeypatch.setattr(
+        "packages.valory.connections.x402.clients.httpx.AsyncClient",
+        _StubAsyncClient,
+    )
+    hooks.client.select_payment_requirements = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda accepts: accepts[0]
+    )
+    hooks.client.create_payment_header = MagicMock(  # type: ignore[method-assign]
+        return_value="payment-header"
+    )
+
+    with pytest.raises(PaymentRejectedAfterRetryError):
+        asyncio.run(hooks.on_response(first_response))
 
 
 class TestX402DefaultTimeout:
@@ -189,10 +325,61 @@ class TestX402RequestsSecondary402:
         assert exc_info.value.status_code == 402
         assert b"price changed" in exc_info.value.body
         assert "price changed" not in str(exc_info.value)
-        assert (
-            str(exc_info.value)
-            == "upstream rejected request after payment was accepted"
-        )
+        assert str(exc_info.value) == EXPECTED_REJECTION_MESSAGE
+
+    def test_gateway_reason_is_logged_at_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The gateway's own reason reaches a WARNING record, not DEBUG only.
+
+        Pearl log bundles are collected at a level that drops DEBUG, which is
+        why ZD#1239 carried the symptom and never the cause.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.DEBUG):
+            _drive_requests_secondary_402(monkeypatch, DECODABLE_RETRY_BODY)
+
+        adapter_records = [
+            r for r in caplog.records if r.name.startswith(X402_LOGGER_PREFIX)
+        ]
+        warnings = [r for r in adapter_records if r.levelno == logging.WARNING]
+        assert any(GATEWAY_REASON in r.getMessage() for r in warnings)
+        assert not [r for r in adapter_records if r.levelno == logging.DEBUG]
+
+    def test_non_decodable_body_falls_back_to_truncated_repr(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A body that is not an x402 response still produces a WARNING.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.WARNING):
+            _drive_requests_secondary_402(monkeypatch, b"<html>bad gateway</html>")
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("bad gateway" in r.getMessage() for r in warnings)
+
+    def test_oversized_non_decodable_body_is_truncated(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An oversized unparseable body is bounded at the 500-byte limit.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.WARNING):
+            _drive_requests_secondary_402(
+                monkeypatch, b"x" * (REJECTION_BODY_LOG_LIMIT + 100)
+            )
+
+        message = [r for r in caplog.records if r.levelno == logging.WARNING][
+            -1
+        ].getMessage()
+        assert "x" * REJECTION_BODY_LOG_LIMIT in message
+        assert "x" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
 
     def test_cancelled_error_propagates_without_wrapping(
         self, monkeypatch: pytest.MonkeyPatch
@@ -368,15 +555,66 @@ class TestX402HttpxRetryTimeout:
         assert exc_info.value.status_code == 402
         assert b"price changed" in exc_info.value.body
         assert "price changed" not in str(exc_info.value)
-        assert (
-            str(exc_info.value)
-            == "upstream rejected request after payment was accepted"
-        )
+        assert str(exc_info.value) == EXPECTED_REJECTION_MESSAGE
 
         assert len(captured_kwargs) == 1
         timeout = captured_kwargs[0]["timeout"]
         assert timeout.connect == 2.5
         assert timeout.read == 7.5
+
+    def test_gateway_reason_is_logged_at_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The gateway's own reason reaches a WARNING record, not DEBUG only.
+
+        Pearl log bundles are collected at a level that drops DEBUG, which is
+        why ZD#1239 carried the symptom and never the cause.
+
+        :param monkeypatch: pytest fixture used to stub the retry client.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.DEBUG):
+            _drive_httpx_secondary_402(monkeypatch, DECODABLE_RETRY_BODY)
+
+        adapter_records = [
+            r for r in caplog.records if r.name.startswith(X402_LOGGER_PREFIX)
+        ]
+        warnings = [r for r in adapter_records if r.levelno == logging.WARNING]
+        assert any(GATEWAY_REASON in r.getMessage() for r in warnings)
+        assert not [r for r in adapter_records if r.levelno == logging.DEBUG]
+
+    def test_non_decodable_body_falls_back_to_truncated_repr(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A body that is not an x402 response still produces a WARNING.
+
+        :param monkeypatch: pytest fixture used to stub the retry client.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.WARNING):
+            _drive_httpx_secondary_402(monkeypatch, b"<html>bad gateway</html>")
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("bad gateway" in r.getMessage() for r in warnings)
+
+    def test_oversized_non_decodable_body_is_truncated(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An oversized unparseable body is bounded at the 500-byte limit.
+
+        :param monkeypatch: pytest fixture used to stub the retry client.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.WARNING):
+            _drive_httpx_secondary_402(
+                monkeypatch, b"x" * (REJECTION_BODY_LOG_LIMIT + 100)
+            )
+
+        message = [r for r in caplog.records if r.levelno == logging.WARNING][
+            -1
+        ].getMessage()
+        assert "x" * REJECTION_BODY_LOG_LIMIT in message
+        assert "x" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
 
     def test_consecutive_402s_on_same_client_both_handled(
         self, monkeypatch: pytest.MonkeyPatch
