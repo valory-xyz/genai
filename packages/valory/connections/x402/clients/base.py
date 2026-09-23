@@ -14,6 +14,7 @@ from packages.valory.connections.x402.exact import sign_payment_header
 from packages.valory.connections.x402.types import (
     PaymentRequirements,
     UnsupportedSchemeException,
+    x402PaymentRequiredResponse,
 )
 
 # Define type for the payment requirements selector
@@ -62,9 +63,38 @@ class PaymentRejectedAfterRetryError(PaymentError):
         :param status_code: HTTP status from the post-payment retry.
         :param body: raw response body from the post-payment retry.
         """
-        super().__init__("upstream rejected request after payment was accepted")
+        super().__init__(
+            f"upstream rejected request with HTTP {status_code} after the payment "
+            "header was attached; the payment was not accepted"
+        )
         self.status_code = status_code
         self.body = body
+
+
+# The retry body is upstream-controlled and reaches shared log bundles, so what
+# is logged from it is bounded: the parsed reason when it decodes, a truncated
+# repr when it does not.
+REJECTION_BODY_LOG_LIMIT = 500
+
+
+def describe_rejection_reason(body: bytes) -> str:
+    """Describe why the gateway rejected the post-payment retry.
+
+    Kept out of :class:`PaymentRejectedAfterRetryError`'s message on purpose:
+    that message is interpolated into caller-visible payloads, so
+    upstream-controlled bytes must not travel with it.
+
+    :param body: raw response body from the post-payment retry.
+    :return: the gateway's own error string, or a truncated repr of the body
+        when it does not decode as an x402 payment-required response.
+    """
+    try:
+        payment_response = x402PaymentRequiredResponse(
+            **json.loads(body.decode("utf-8"))
+        )
+    except Exception:  # pylint: disable=broad-except
+        return repr(body[:REJECTION_BODY_LOG_LIMIT])
+    return payment_response.error
 
 
 def decode_x_payment_response(header: str) -> Dict[str, Any]:
