@@ -381,6 +381,22 @@ class TestX402RequestsSecondary402:
         assert "x" * REJECTION_BODY_LOG_LIMIT in message
         assert "x" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
 
+    def test_reasonless_body_falls_back_to_truncated_repr(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A decodable body stating no reason still logs something usable.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        :param caplog: pytest fixture capturing log records.
+        """
+        with caplog.at_level(logging.WARNING):
+            _drive_requests_secondary_402(
+                monkeypatch, b'{"x402Version": 1, "accepts": [], "error": ""}'
+            )
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("x402Version" in r.getMessage() for r in warnings)
+
     def test_cancelled_error_propagates_without_wrapping(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
