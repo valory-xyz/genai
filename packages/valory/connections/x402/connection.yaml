@@ -9,7 +9,7 @@ fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeibzpik27ktta4f7igkxkq5e5qnew6fgxeywz6poput7jfliz526v4
-  clients/base.py: bafybeibbhfgebeika43qvrrzvmtj36d6tfgu7rlrj2tc7gsm5a5dd4oypa
+  clients/base.py: bafybeihazsubdsblliw7yb7hkitfwc5eazvczy6wvajbifmmhlw434cbje
   clients/httpx.py: bafybeiazvipito3pns5gkjoyom2hvi7mno7jg5t3264y5prii4mtklcgjq
   clients/requests.py: bafybeieqdh4x7eplnavna2ju5bzj4oyu77gce56k2imr6t2dnvzor4yr5a
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
@@ -18,7 +18,7 @@ fingerprint:
   exact.py: bafybeicd3d5iya5o27ekk7qvhnya54o3c3guq74h6v6ttcc4yoht4si7fy
   networks.py: bafybeieo34m7hjcbsjx4lhbtjjpqx3lg7m2crm2mnlcdn2tfttygxrdzsa
   tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
-  tests/test_clients.py: bafybeighmkezpdrtmbwtargr4xyek4bhhmikxviqcvbtk76jfnjctogree
+  tests/test_clients.py: bafybeih5sz3hajd52d6yvlc4s5vqo6nz3dmnwralw5asmqpzoozdllveny
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []

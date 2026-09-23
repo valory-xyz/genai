@@ -381,6 +381,33 @@ class TestX402RequestsSecondary402:
         assert "x" * REJECTION_BODY_LOG_LIMIT in message
         assert "x" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
 
+    def test_oversized_gateway_reason_is_truncated(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A decodable body's ``error`` is bounded at the same 500-byte limit.
+
+        The parsed reason is upstream-controlled just like the raw body, so it
+        must not be the one path that lets unbounded bytes into a log bundle.
+
+        :param monkeypatch: pytest fixture used to stub adapter internals.
+        :param caplog: pytest fixture capturing log records.
+        """
+        body = json.dumps(
+            {
+                "x402Version": 1,
+                "accepts": [],
+                "error": "e" * (REJECTION_BODY_LOG_LIMIT + 100),
+            }
+        ).encode("utf-8")
+        with caplog.at_level(logging.WARNING):
+            _drive_requests_secondary_402(monkeypatch, body)
+
+        message = [r for r in caplog.records if r.levelno == logging.WARNING][
+            -1
+        ].getMessage()
+        assert "e" * REJECTION_BODY_LOG_LIMIT in message
+        assert "e" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
+
     def test_reasonless_body_falls_back_to_truncated_repr(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -631,6 +658,33 @@ class TestX402HttpxRetryTimeout:
         ].getMessage()
         assert "x" * REJECTION_BODY_LOG_LIMIT in message
         assert "x" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
+
+    def test_oversized_gateway_reason_is_truncated(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A decodable body's ``error`` is bounded at the same 500-byte limit.
+
+        The parsed reason is upstream-controlled just like the raw body, so it
+        must not be the one path that lets unbounded bytes into a log bundle.
+
+        :param monkeypatch: pytest fixture used to stub the retry client.
+        :param caplog: pytest fixture capturing log records.
+        """
+        body = json.dumps(
+            {
+                "x402Version": 1,
+                "accepts": [],
+                "error": "e" * (REJECTION_BODY_LOG_LIMIT + 100),
+            }
+        ).encode("utf-8")
+        with caplog.at_level(logging.WARNING):
+            _drive_httpx_secondary_402(monkeypatch, body)
+
+        message = [r for r in caplog.records if r.levelno == logging.WARNING][
+            -1
+        ].getMessage()
+        assert "e" * REJECTION_BODY_LOG_LIMIT in message
+        assert "e" * (REJECTION_BODY_LOG_LIMIT + 1) not in message
 
     def test_consecutive_402s_on_same_client_both_handled(
         self, monkeypatch: pytest.MonkeyPatch

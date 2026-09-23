@@ -87,7 +87,8 @@ def describe_rejection_reason(body: bytes) -> str:
     :param body: raw response body from the post-payment retry.
     :return: the gateway's own error string, or a truncated repr of the body
         when it does not decode as an x402 payment-required response or states
-        no reason.
+        no reason. Both forms are bounded at ``REJECTION_BODY_LOG_LIMIT``: the
+        parsed reason is upstream-controlled just as much as the raw body is.
     """
     try:
         payment_response = x402PaymentRequiredResponse(
@@ -95,7 +96,8 @@ def describe_rejection_reason(body: bytes) -> str:
         )
     except Exception:  # pylint: disable=broad-except
         return repr(body[:REJECTION_BODY_LOG_LIMIT])
-    return payment_response.error or repr(body[:REJECTION_BODY_LOG_LIMIT])
+    reason = payment_response.error[:REJECTION_BODY_LOG_LIMIT]
+    return reason or repr(body[:REJECTION_BODY_LOG_LIMIT])
 
 
 def decode_x_payment_response(header: str) -> Dict[str, Any]:
