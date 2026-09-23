@@ -25,7 +25,7 @@
 import base64
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import google.api_core.exceptions
@@ -37,6 +37,7 @@ from packages.valory.connections.genai.connection import (
     GenaiConnection,
 )
 from packages.valory.connections.x402.clients.base import PaymentError
+from packages.valory.connections.x402.clients.mech import MechDepositRequiredError
 
 
 def _make_stub_for_get_response(use_x402: bool = False) -> Any:
@@ -139,17 +140,31 @@ class TestGenerateContentDeadline:
 class TestProcessX402RequestPaymentResponseHeader:
     """Tests for ``_process_x402_request``."""
 
-    def _make_x402_stub(self) -> Any:
+    def _make_x402_stub(self, **overrides: Any) -> Any:
         """Build a stub with the attributes ``_process_x402_request`` reads."""
-        return SimpleNamespace(
+        stub = SimpleNamespace(
             use_x402=True,
+            use_mech_facilitator=False,
+            mech_facilitator_base_url="http://facilitator.example",
+            mech_chain="optimism",
+            mech_safe_addresses={"optimism": "0x" + "11" * 20},
+            mech_max_delivery_rate=None,
             logger=MagicMock(),
             genai_x402_server_base_url="http://x402.example.com",
             connection_private_key=(
                 "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
             ),
-            _eoa_account=MagicMock(),  # x402_requests is monkeypatched away
+            _eoa_account=MagicMock(),  # the session factories are monkeypatched away
         )
+        for key, value in overrides.items():
+            setattr(stub, key, value)
+        # Resolve the session the same way the real connection does.
+        stub._paid_session_and_base_url = (
+            lambda: GenaiConnection._paid_session_and_base_url(
+                cast(GenaiConnection, stub)
+            )
+        )
+        return stub
 
     def test_payment_header_missing_transaction_does_not_break_response(
         self, monkeypatch: pytest.MonkeyPatch
@@ -462,3 +477,125 @@ class TestProcessX402RequestPaymentResponseHeader:
                 model_name="gemini-2.5-flash",
                 generation_config_kwargs={},
             )
+
+
+class TestMechFacilitatorPath:
+    """Tests for the mech-marketplace session selection in the genai connection."""
+
+    def _stub(self, **overrides: Any) -> Any:
+        return TestProcessX402RequestPaymentResponseHeader()._make_x402_stub(
+            **overrides
+        )
+
+    def test_flag_off_keeps_the_x402_session_and_proxy_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With the flag off nothing changes: x402 session, x402 proxy URL."""
+        stub = self._stub(use_mech_facilitator=False)
+        seen: dict = {}
+
+        def fake_x402(account: Any, **_k: Any) -> Any:
+            seen["x402_account"] = account
+            return "x402-session"
+
+        monkeypatch.setattr(genai_connection, "x402_requests", fake_x402)
+        monkeypatch.setattr(
+            genai_connection,
+            "mech_requests",
+            lambda *_a, **_k: pytest.fail("mech_requests must not be used"),
+        )
+
+        session, base_url = stub._paid_session_and_base_url()
+
+        assert session == "x402-session"
+        assert seen["x402_account"] is stub._eoa_account
+        assert base_url == "http://x402.example.com"
+
+    def test_flag_on_builds_a_mech_session_against_the_facilitator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With the flag on the session is a mech session and paths hang off /v1beta."""
+        stub = self._stub(use_mech_facilitator=True, mech_max_delivery_rate=12000)
+        seen: dict = {}
+
+        def fake_mech(account: Any, **kwargs: Any) -> Any:
+            seen["account"] = account
+            seen.update(kwargs)
+            return "mech-session"
+
+        monkeypatch.setattr(genai_connection, "mech_requests", fake_mech)
+        monkeypatch.setattr(
+            genai_connection,
+            "x402_requests",
+            lambda *_a, **_k: pytest.fail("x402_requests must not be used"),
+        )
+
+        session, base_url = stub._paid_session_and_base_url()
+
+        assert session == "mech-session"
+        assert seen["account"] is stub._eoa_account
+        assert seen["safe_address"] == "0x" + "11" * 20
+        assert seen["chain"] == "optimism"
+        assert seen["api"] == "chat"
+        assert seen["facilitator_base_url"] == "http://facilitator.example"
+        assert seen["max_delivery_rate"] == 12000
+        assert base_url == "http://facilitator.example/v1beta"
+
+    def test_flag_on_without_a_safe_for_the_chain_is_a_payment_error(self) -> None:
+        """Misconfiguration surfaces as a PaymentError, not a KeyError."""
+        stub = self._stub(use_mech_facilitator=True, mech_safe_addresses={})
+
+        with pytest.raises(PaymentError):
+            stub._paid_session_and_base_url()
+
+    def test_mech_path_does_not_warn_about_a_missing_payment_header(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mech-settled calls carry no X-Payment-Response; that is not a warning."""
+        stub = self._stub(use_mech_facilitator=True)
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "hello"}]}}]
+        }
+        fake_response.headers = {}
+        fake_session = MagicMock()
+        fake_session.post.return_value = fake_response
+        monkeypatch.setattr(
+            genai_connection, "mech_requests", lambda *_a, **_k: fake_session
+        )
+
+        text, error = GenaiConnection._process_x402_request(
+            stub,
+            payload={"prompt": "hi"},
+            model_name="gemini-2.5-flash",
+            generation_config_kwargs={},
+        )
+
+        assert (text, error) == ("hello", False)
+        stub.logger.warning.assert_not_called()
+        posted_url = fake_session.post.call_args.args[0]
+        assert posted_url == (
+            "http://facilitator.example/v1beta/models/gemini-2.5-flash:generateContent"
+        )
+
+    def test_deposit_required_is_returned_as_a_structured_error(self) -> None:
+        """The skill needs the shortfall numbers to trigger a top-up."""
+        stub = _make_stub_for_get_response(use_x402=True)
+
+        def fake_process(*_a: Any, **_k: Any) -> Any:
+            raise MechDepositRequiredError(
+                balance=12000, reserved=10000, available=2000, required=10000
+            )
+
+        stub._process_x402_request = fake_process
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
+
+        assert error is True
+        assert body["code"] == "mech_deposit_required"
+        assert body["context"] == {
+            "balance": 12000,
+            "reserved": 10000,
+            "available": 2000,
+            "required": 10000,
+        }
