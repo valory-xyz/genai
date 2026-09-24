@@ -52,11 +52,16 @@ DEFAULT_REQUEST_TTL_SECS = 120
 DEFAULT_NONCE_RETRIES = 2
 # Must outlast the facilitator's upstream deadline (120s): an abandoned call is still charged.
 DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, 150.0)
-# How many times to wait out a 409 request_in_progress after a timeout.
+# How many times to wait out a 409 request_in_progress after a timeout,
+# and a 409 requester_busy (another call from the same Safe in flight).
 DEFAULT_IN_PROGRESS_RETRIES = 3
+DEFAULT_BUSY_RETRIES = 3
 
 _NONCE_MISMATCH = "nonce_mismatch"
 _IN_PROGRESS = "request_in_progress"
+_BUSY = "requester_busy"
+# Answers that leave it unknown whether the facilitator served the call.
+_GATEWAY_STATUSES = {502, 504}
 
 
 class MechDepositRequiredError(PaymentError):
@@ -312,16 +317,26 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
     def _post_signed(
         self, prepared: requests.PreparedRequest, **kwargs: Any
     ) -> requests.Response:
-        """Post a signed body; after a read timeout, collect the stored response for the same body.
+        """Post a signed body; if the outcome is unknown, ask again for the same body.
+
+        A timeout, a dropped connection or a gateway 502/504 in front of
+        the facilitator may hide a call it served and charged; the same
+        request_id is then answered from the stored response.
 
         :param prepared: the signed POST.
         :param kwargs: adapter send arguments.
         :return: the facilitator's response.
         """
         try:
-            return super().send(prepared, **kwargs)
-        except requests.exceptions.Timeout:
-            _logger.warning("mech request timed out; asking for the stored response")
+            response = super().send(prepared, **kwargs)
+            if response.status_code not in _GATEWAY_STATUSES:
+                return response
+            _logger.warning(
+                "mech request answered %s; asking for the stored response",
+                response.status_code,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            _logger.warning("mech request failed; asking for the stored response")
         response = super().send(prepared, **kwargs)
         # The original may still be finishing on the facilitator; it says
         # when to ask again.
@@ -351,8 +366,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         info = self._fetch_info(**kwargs)
         nonce = info.next_nonce
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
+        busy_waits = 0
 
-        for attempt in range(self.nonce_retries + 1):
+        attempt = 0
+        while attempt <= self.nonce_retries:
             body = self._signed_body(call, info, nonce)
             prepared = requests.Request(
                 "POST",
@@ -377,14 +394,27 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 )
             if (
                 response.status_code == 409
+                and error == _BUSY
+                and busy_waits < DEFAULT_BUSY_RETRIES
+            ):
+                # Another call from this Safe is in flight; when it is done
+                # the next nonce may have moved, so re-read it.
+                busy_waits += 1
+                time.sleep(_retry_after_secs(response))
+                info = self._fetch_info(**kwargs)
+                nonce = info.next_nonce
+                continue
+            if (
+                response.status_code == 409
                 and error == _NONCE_MISMATCH
                 and attempt < self.nonce_retries
             ):
                 nonce = int(context["expected"])
+                attempt += 1
                 _logger.info(
                     "mech nonce collision, retrying at slot %s (attempt %s)",
                     nonce,
-                    attempt + 1,
+                    attempt,
                 )
                 continue
             raise MechRequestRejectedError(

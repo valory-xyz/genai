@@ -198,6 +198,8 @@ class _FakeFacilitator:
         self._posts = list(post_responses)
         self.info = dict(_INFO_JSON)
         self.info_headers: Dict[str, str] = {"content-type": "application/json"}
+        # Replaces ``info`` after the first POST, to model another call landing.
+        self.info_after_post: Optional[Dict[str, Any]] = None
 
     def send(self, _adapter: Any, request: requests.PreparedRequest, **kwargs: Any):
         self.calls.append(
@@ -214,6 +216,8 @@ class _FakeFacilitator:
             )
         assert self._posts, "unexpected POST"
         item = self._posts.pop(0)
+        if self.info_after_post is not None:
+            self.info = self.info_after_post
         if isinstance(item, Exception):
             raise item
         return item
@@ -636,3 +640,69 @@ def test_in_progress_that_never_clears_is_raised(
         session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert excinfo.value.error == "request_in_progress"
+
+
+def _busy_response() -> requests.Response:
+    response = _json_response(
+        409, {"detail": {"error": "requester_busy", "detail": "busy", "context": {}}}
+    )
+    response.headers["Retry-After"] = "1"
+    return response
+
+
+def test_requester_busy_is_waited_out_and_the_nonce_re_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another call from the same Safe in flight: wait, then sign at the fresh next nonce."""
+    fake = _FakeFacilitator([_busy_response(), _response(200, _UPSTREAM_BODY)])
+    fake.info_after_post = dict(_INFO_JSON, next_nonce=8)  # the other call lands
+    session = _session_with(fake)()
+    slept: List[float] = []
+    monkeypatch.setattr(mech_module.time, "sleep", slept.append)
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert slept == [1.0]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
+    assert _posted_body(fake, 0)["nonce"] == "7"
+    assert _posted_body(fake, 1)["nonce"] == "8"
+
+
+def test_requester_busy_that_never_clears_is_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeFacilitator([_busy_response()] * 5)
+    session = _session_with(fake)()
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+
+    with _patched(fake), pytest.raises(MechRequestRejectedError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert excinfo.value.error == "requester_busy"
+    assert len([c for c in fake.calls if c["method"] == "POST"]) == 4
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        requests.exceptions.ConnectionError("reset"),
+        pytest.param("gateway-502", id="502"),
+        pytest.param("gateway-504", id="504"),
+    ],
+)
+def test_unknown_outcomes_replay_the_same_signed_body(first: Any) -> None:
+    """A dropped connection or a proxy 502/504 may hide a served, charged call."""
+    if isinstance(first, str):
+        first = _response(
+            int(first[-3:]), b"<html>gateway</html>", {"content-type": "text/html"}
+        )
+    fake = _FakeFacilitator([first, _response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert _posted_body(fake, 0)["request_id"] == _posted_body(fake, 1)["request_id"]

@@ -148,7 +148,7 @@ class TestProcessX402RequestPaymentResponseHeader:
             mech_facilitator_base_url="http://facilitator.example",
             mech_chain="optimism",
             mech_safe_addresses={"optimism": "0x" + "11" * 20},
-            mech_max_delivery_rate=None,
+            mech_max_delivery_rate=12000,
             logger=MagicMock(),
             genai_x402_server_base_url="http://x402.example.com",
             connection_private_key=(
@@ -580,9 +580,24 @@ class TestMechFacilitatorPath:
         """The mech flag only acts on the paid path; setting it alone is a misconfiguration."""
         logger = MagicMock()
 
-        genai_connection._check_payment_flags(logger, use_x402, use_mech)
+        genai_connection._check_payment_flags(logger, use_x402, use_mech, 12000)
 
         assert logger.warning.called is warns
+
+    def test_mech_flag_without_a_rate_cap_warns_at_construction(self) -> None:
+        """Enabling the mech path without a rate cap is called out when the connection starts."""
+        logger = MagicMock()
+
+        genai_connection._check_payment_flags(logger, True, True, None)
+
+        assert logger.warning.called is True
+
+    def test_flag_on_without_a_rate_cap_is_a_payment_error(self) -> None:
+        """Without a cap the agent would sign any rate the facilitator reports."""
+        stub = self._stub(use_mech_facilitator=True, mech_max_delivery_rate=None)
+
+        with pytest.raises(PaymentError, match="mech_max_delivery_rate"):
+            stub._paid_session_and_base_url()
 
     def test_mech_path_does_not_warn_about_a_missing_payment_header(
         self, monkeypatch: pytest.MonkeyPatch

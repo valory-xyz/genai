@@ -102,18 +102,27 @@ class SrrDialogues(BaseSrrDialogues):
 
 
 def _check_payment_flags(
-    logger: Any, use_x402: Any, use_mech_facilitator: bool
+    logger: Any,
+    use_x402: Any,
+    use_mech_facilitator: bool,
+    mech_max_delivery_rate: Any = None,
 ) -> None:
-    """Warn when ``use_mech_facilitator`` is set without ``use_x402``, where it has no effect.
+    """Warn at construction about a mech configuration that cannot work as intended.
 
     :param logger: the connection logger.
     :param use_x402: the ``use_x402`` config value.
     :param use_mech_facilitator: the ``use_mech_facilitator`` config value.
+    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value.
     """
     if use_mech_facilitator and not use_x402:
         logger.warning(
             "use_mech_facilitator is set but use_x402 is off; the mech "
             "facilitator is only used on the paid path, so this flag is ignored"
+        )
+    if use_mech_facilitator and mech_max_delivery_rate is None:
+        logger.warning(
+            "use_mech_facilitator is set without mech_max_delivery_rate; every "
+            "mech call will be refused until a cap is configured"
         )
 
 
@@ -152,7 +161,12 @@ class GenaiConnection(BaseSyncConnection):
         self.use_mech_facilitator = bool(
             self.configuration.config.get("use_mech_facilitator", False)
         )
-        _check_payment_flags(self.logger, self.use_x402, self.use_mech_facilitator)
+        _check_payment_flags(
+            self.logger,
+            self.use_x402,
+            self.use_mech_facilitator,
+            self.configuration.config.get("mech_max_delivery_rate"),
+        )
         self.mech_facilitator_base_url = self.configuration.config.get(
             "mech_facilitator_base_url"
         )
@@ -257,17 +271,19 @@ class GenaiConnection(BaseSyncConnection):
                 "mech facilitator enabled but mech_facilitator_base_url or the "
                 f"Safe address for chain {chain!r} is not configured"
             )
+        if self.mech_max_delivery_rate is None:
+            # Without a cap the agent would sign whatever rate the
+            # facilitator reports, so one bad rate could drain the deposit.
+            raise PaymentError(
+                "mech facilitator enabled but mech_max_delivery_rate is not set"
+            )
         session = mech_requests(
             self._eoa_account,
             safe_address=safe_address,
             chain=chain,
             api=MECH_API,
             facilitator_base_url=str(self.mech_facilitator_base_url),
-            max_delivery_rate=(
-                int(self.mech_max_delivery_rate)
-                if self.mech_max_delivery_rate is not None
-                else None
-            ),
+            max_delivery_rate=int(self.mech_max_delivery_rate),
         )
         base_url = str(self.mech_facilitator_base_url).rstrip("/")
         return session, base_url + GEMINI_UPSTREAM_PREFIX
