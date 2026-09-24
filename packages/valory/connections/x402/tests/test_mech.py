@@ -800,3 +800,44 @@ def test_rate_limited_info_route_is_waited_out(monkeypatch: pytest.MonkeyPatch) 
     assert response.status_code == 200
     assert gets["n"] == 2
     assert clock["t"] == 1.0
+
+
+def test_max_wait_hint_extends_the_busy_wait_past_the_default_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The facilitator's max_wait_secs says how long a 409 could last; the client waits that long."""
+    busy = _json_response(
+        409,
+        {
+            "detail": {
+                "error": "requester_busy",
+                "detail": "busy",
+                "context": {"max_wait_secs": "30"},
+            }
+        },
+    )
+    busy.headers["Retry-After"] = "5"
+    fake = _FakeFacilitator([busy] * 6 + [_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake)()
+    clock = _fake_clock(monkeypatch)
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert clock["t"] == 30.0  # six waits of five seconds, as hinted
+    assert len([c for c in fake.calls if c["method"] == "POST"]) == 7
+
+
+def test_without_a_hint_the_busy_wait_keeps_its_default_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeFacilitator([_busy_response()] * 5)
+    session = _session_with(fake)()
+    _fake_clock(monkeypatch)
+
+    with _patched(fake), pytest.raises(MechRequestRejectedError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert excinfo.value.error == "requester_busy"
+    assert len([c for c in fake.calls if c["method"] == "POST"]) == 4

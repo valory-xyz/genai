@@ -186,6 +186,23 @@ def _retry_after_secs(
     return max(1.0, min(cap, wait))
 
 
+def _max_wait_secs(response: requests.Response) -> float:
+    """Return the facilitator's ``max_wait_secs`` hint (the most a wait can take), else 0."""
+    parsed = _facilitator_error(response)
+    if parsed is None:
+        return 0.0
+    try:
+        return float(parsed[2].get("max_wait_secs", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _wait_budget_secs(response: requests.Response, default_attempts: int) -> float:
+    """Total time worth spending on one 409: the hint if given, else a few Retry-After rounds."""
+    hinted = _max_wait_secs(response)
+    return hinted if hinted > 0 else default_attempts * _retry_after_secs(response)
+
+
 def _facilitator_error(response: requests.Response) -> Optional[Tuple[str, str, Dict]]:
     """Return ``(error, detail, context)`` if ``response`` is a facilitator error body.
 
@@ -376,18 +393,24 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self._check(deadline)
         response = super().send(prepared, **kwargs)
         # The original may still be finishing on the facilitator; it says
-        # when to ask again.
-        for _ in range(DEFAULT_IN_PROGRESS_RETRIES):
+        # when to ask again and, at most, how long that could take.
+        budget: Optional[float] = None
+        while True:
             parsed = _facilitator_error(response)
             if (
                 response.status_code != 409
                 or parsed is None
                 or parsed[0] != _IN_PROGRESS
             ):
-                break
-            self._wait(deadline, _retry_after_secs(response))
+                return response
+            if budget is None:
+                budget = _wait_budget_secs(response, DEFAULT_IN_PROGRESS_RETRIES)
+            wait = _retry_after_secs(response)
+            if wait > budget:
+                return response
+            budget -= wait
+            self._wait(deadline, wait)
             response = super().send(prepared, **kwargs)
-        return response
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         """Sign the call for the marketplace and post it to the facilitator.
@@ -404,7 +427,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         info = self._fetch_info(deadline, **kwargs)
         nonce = info.next_nonce
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
-        busy_waits = 0
+        busy_budget: Optional[float] = None
 
         attempt = 0
         while attempt <= self.nonce_retries:
@@ -431,18 +454,18 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                     available=int(context.get("available", 0)),
                     required=int(context.get("required", 0)),
                 )
-            if (
-                response.status_code == 409
-                and error == _BUSY
-                and busy_waits < DEFAULT_BUSY_RETRIES
-            ):
+            if response.status_code == 409 and error == _BUSY:
                 # Another call from this Safe is in flight; when it is done
                 # the next nonce may have moved, so re-read it.
-                busy_waits += 1
-                self._wait(deadline, _retry_after_secs(response))
-                info = self._fetch_info(deadline, **kwargs)
-                nonce = info.next_nonce
-                continue
+                if busy_budget is None:
+                    busy_budget = _wait_budget_secs(response, DEFAULT_BUSY_RETRIES)
+                wait = _retry_after_secs(response)
+                if wait <= busy_budget:
+                    busy_budget -= wait
+                    self._wait(deadline, wait)
+                    info = self._fetch_info(deadline, **kwargs)
+                    nonce = info.next_nonce
+                    continue
             if (
                 response.status_code == 409
                 and error == _NONCE_MISMATCH
