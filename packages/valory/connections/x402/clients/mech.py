@@ -56,6 +56,11 @@ DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, 150.0)
 # and a 409 requester_busy (another call from the same Safe in flight).
 DEFAULT_IN_PROGRESS_RETRIES = 3
 DEFAULT_BUSY_RETRIES = 3
+DEFAULT_INFO_RATE_LIMIT_RETRIES = 3
+# Wall-clock cap on one call, all waits and retries included, so a
+# struggling facilitator cannot hold the connection's single worker for
+# many minutes. One attempt may still run its read timeout past this.
+DEFAULT_TOTAL_DEADLINE_SECS = 300.0
 
 _NONCE_MISMATCH = "nonce_mismatch"
 _IN_PROGRESS = "request_in_progress"
@@ -106,6 +111,10 @@ class MechRequestRejectedError(PaymentError):
 
 class MechRateExceededError(PaymentError):
     """The facilitator's delivery rate is above the caller's cap."""
+
+
+class MechDeadlineExceededError(PaymentError):
+    """The call's total wall-clock budget ran out across its waits and retries."""
 
 
 @dataclass(frozen=True)
@@ -217,6 +226,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
         nonce_retries: int = DEFAULT_NONCE_RETRIES,
         default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
+        total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
         **kwargs: Any,
     ) -> None:
         """Initialise the adapter.
@@ -230,9 +240,11 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param ttl_secs: how long a signed request stays valid.
         :param nonce_retries: how many nonce collisions to retry through.
         :param default_timeout: timeout applied when the caller passes none.
+        :param total_deadline_secs: wall-clock cap on one call including retries.
         :param kwargs: passed to ``HTTPAdapter``.
         """
         super().__init__(**kwargs)
+        self.total_deadline_secs = total_deadline_secs
         self.account = account
         self.safe_address = safe_address
         self.chain = chain.lower()
@@ -261,10 +273,30 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             "body_b64": base64.b64encode(body).decode("ascii") if body else "",
         }
 
-    def _fetch_info(self, **send_kwargs: Any) -> RequesterInfo:
+    @staticmethod
+    def _wait(deadline: float, secs: float) -> None:
+        """Sleep ``secs`` unless that would pass ``deadline``, in which case give up."""
+        if secs > deadline - time.monotonic():
+            raise MechDeadlineExceededError(
+                f"mech call exceeded its {DEFAULT_TOTAL_DEADLINE_SECS:.0f}s budget"
+            )
+        time.sleep(secs)
+
+    @staticmethod
+    def _check(deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise MechDeadlineExceededError("mech call exceeded its budget")
+
+    def _fetch_info(self, deadline: float, **send_kwargs: Any) -> RequesterInfo:
         url = f"{self.facilitator_base_url}/mech/{self.chain}/requester/{self.safe_address}"
         prepared = requests.Request("GET", url).prepare()
         response = super().send(prepared, **send_kwargs)
+        for _ in range(DEFAULT_INFO_RATE_LIMIT_RETRIES):
+            if response.status_code != 429:
+                break
+            # The route is rate limited process-wide; it says when to retry.
+            self._wait(deadline, _retry_after_secs(response))
+            response = super().send(prepared, **send_kwargs)
         if response.status_code != 200:
             parsed = _facilitator_error(response)
             error, detail = (
@@ -322,15 +354,12 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         }
 
     def _post_signed(
-        self, prepared: requests.PreparedRequest, **kwargs: Any
+        self, prepared: requests.PreparedRequest, deadline: float, **kwargs: Any
     ) -> requests.Response:
         """Post a signed body; if the outcome is unknown, ask again for the same body.
 
-        A timeout, a dropped connection or a gateway 502/504 in front of
-        the facilitator may hide a call it served and charged; the same
-        request_id is then answered from the stored response.
-
         :param prepared: the signed POST.
+        :param deadline: monotonic instant after which no more waiting is done.
         :param kwargs: adapter send arguments.
         :return: the facilitator's response.
         """
@@ -344,6 +373,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             )
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             _logger.warning("mech request failed; asking for the stored response")
+        self._check(deadline)
         response = super().send(prepared, **kwargs)
         # The original may still be finishing on the facilitator; it says
         # when to ask again.
@@ -355,7 +385,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 or parsed[0] != _IN_PROGRESS
             ):
                 break
-            time.sleep(_retry_after_secs(response))
+            self._wait(deadline, _retry_after_secs(response))
             response = super().send(prepared, **kwargs)
         return response
 
@@ -368,9 +398,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         """
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = self._default_timeout
+        deadline = time.monotonic() + self.total_deadline_secs
 
         call = self._upstream_call(request)
-        info = self._fetch_info(**kwargs)
+        info = self._fetch_info(deadline, **kwargs)
         nonce = info.next_nonce
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_waits = 0
@@ -384,7 +415,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 headers={"Content-Type": "application/json"},
                 data=json.dumps(body),
             ).prepare()
-            response = self._post_signed(prepared, **kwargs)
+            self._check(deadline)
+            response = self._post_signed(prepared, deadline, **kwargs)
             if 200 <= response.status_code < 300:
                 return response
 
@@ -407,8 +439,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 # Another call from this Safe is in flight; when it is done
                 # the next nonce may have moved, so re-read it.
                 busy_waits += 1
-                time.sleep(_retry_after_secs(response))
-                info = self._fetch_info(**kwargs)
+                self._wait(deadline, _retry_after_secs(response))
+                info = self._fetch_info(deadline, **kwargs)
                 nonce = info.next_nonce
                 continue
             if (

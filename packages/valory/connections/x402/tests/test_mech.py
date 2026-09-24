@@ -37,6 +37,7 @@ from packages.valory.connections.x402.clients.base import PaymentError
 from packages.valory.connections.x402.clients.mech import (
     DEFAULT_MECH_TIMEOUT,
     DEFAULT_REQUEST_TTL_SECS,
+    MechDeadlineExceededError,
     MechDepositRequiredError,
     MechRateExceededError,
     MechRequestRejectedError,
@@ -739,3 +740,63 @@ def test_retry_after_honours_the_facilitators_remaining_window(
 
     assert response.status_code == 200
     assert slept == [118.0, DEFAULT_MECH_TIMEOUT[1]]
+
+
+def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> Dict[str, float]:
+    """Make time.sleep advance a fake monotonic clock instead of waiting."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+
+    def _sleep(secs: float) -> None:
+        clock["t"] += secs
+
+    monkeypatch.setattr(mech_module.time, "sleep", _sleep)
+    return clock
+
+
+def test_call_gives_up_once_its_total_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested waits never add up past the deadline, however patient the facilitator asks us to be."""
+    busy = _busy_response()
+    busy.headers["Retry-After"] = "120"
+    fake = _FakeFacilitator([busy] * 10)
+    session = _session_with(fake, total_deadline_secs=250.0)()
+    clock = _fake_clock(monkeypatch)
+
+    with _patched(fake), pytest.raises(MechDeadlineExceededError):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    posts = [c for c in fake.calls if c["method"] == "POST"]
+    assert len(posts) == 3  # 0s, 120s, 240s; the third wait would pass 250s
+    assert clock["t"] == 240.0
+
+
+def test_rate_limited_info_route_is_waited_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 from the info route says when to retry; the call waits instead of failing."""
+    limited = _json_response(
+        429, {"detail": {"error": "rate_limited", "detail": "slow down", "context": {}}}
+    )
+    limited.headers["Retry-After"] = "1"
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    real_send = fake.send
+    gets = {"n": 0}
+
+    def _send(adapter: Any, request: requests.PreparedRequest, **kwargs: Any):
+        if request.method == "GET":
+            gets["n"] += 1
+            if gets["n"] == 1:
+                return limited
+        return real_send(adapter, request, **kwargs)
+
+    session = _session_with(fake)()
+    clock = _fake_clock(monkeypatch)
+
+    with patch.object(
+        requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=_send
+    ):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert gets["n"] == 2
+    assert clock["t"] == 1.0

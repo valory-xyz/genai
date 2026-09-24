@@ -7,6 +7,7 @@ from packages.valory.connections.x402.clients.base import (
     x402Client,
 )
 from packages.valory.connections.x402.clients.mech import (
+    MechDeadlineExceededError,
     MechDepositRequiredError,
     MechHTTPAdapter,
     MechRateExceededError,
@@ -26,6 +27,7 @@ __all__ = [
     "x402HTTPAdapter",
     "x402_http_adapter",
     "x402_requests",
+    "MechDeadlineExceededError",
     "MechDepositRequiredError",
     "MechHTTPAdapter",
     "MechRateExceededError",

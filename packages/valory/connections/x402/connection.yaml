@@ -8,10 +8,10 @@ aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
-  clients/__init__.py: bafybeieojv4duzllivznhxlfgapkbvfjykkw72hodupv6yj3o72zdkqevm
+  clients/__init__.py: bafybeiha5744hjmx2tglfpnrfw4ydvgzsmgqjseetbtifpzyvykvtmwcyi
   clients/base.py: bafybeiby3gqwh2geyl4vlrkkyr464cg3xpfwsthdk3xflb7bum76abfn3q
   clients/httpx.py: bafybeie7tqd5zmpclnnvm76zb3rmwn3yy3eth2o4usriwx7sjqqccb6mse
-  clients/mech.py: bafybeiafe34pkew5hbml5qt4a5kbbsbfluuhpsjo3c667qamkutkkprq3a
+  clients/mech.py: bafybeibrufhsf6tn5ctqmhhyugkxzsampfycl2s3w6ndxf2ut7mcrngdcq
   clients/requests.py: bafybeiczmshp5jv447qlhbichwwwavwd5cbaynxkrta2koqchgx7naheim
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
@@ -21,7 +21,7 @@ fingerprint:
   networks.py: bafybeieo34m7hjcbsjx4lhbtjjpqx3lg7m2crm2mnlcdn2tfttygxrdzsa
   tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
   tests/test_clients.py: bafybeighkb7unnvw3o4zv4pgtxma54rhdyhcrmotp6nkcuc6wbp4uscfqy
-  tests/test_mech.py: bafybeib7edd3xfosa53mmppxpjnszd2p3iymkffbnv4oqnsfg6xu4alapu
+  tests/test_mech.py: bafybeicpmyrpmzn4fb7qp7abz3mvjrhmlq2vreou5723kvm3syqmhla7qi
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
