@@ -706,3 +706,36 @@ def test_unknown_outcomes_replay_the_same_signed_body(first: Any) -> None:
 
     assert response.status_code == 200
     assert _posted_body(fake, 0)["request_id"] == _posted_body(fake, 1)["request_id"]
+
+
+def test_retry_after_honours_the_facilitators_remaining_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 409 carrying the remaining reservation time is waited out in full, capped at the timeout."""
+    in_progress = _json_response(
+        409,
+        {"detail": {"error": "request_in_progress", "detail": "busy", "context": {}}},
+    )
+    in_progress.headers["Retry-After"] = "118"
+    too_long = _json_response(
+        409,
+        {"detail": {"error": "request_in_progress", "detail": "busy", "context": {}}},
+    )
+    too_long.headers["Retry-After"] = "9999"
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            in_progress,
+            too_long,
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    session = _session_with(fake)()
+    slept: List[float] = []
+    monkeypatch.setattr(mech_module.time, "sleep", slept.append)
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert slept == [118.0, DEFAULT_MECH_TIMEOUT[1]]

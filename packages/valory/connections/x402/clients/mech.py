@@ -161,7 +161,14 @@ def _server_time(response: requests.Response) -> Optional[int]:
         return None
 
 
-def _retry_after_secs(response: requests.Response, *, cap: float = 10.0) -> float:
+# The facilitator reports the remaining reservation window, up to its
+# upstream deadline; never wait longer than our own read timeout.
+_RETRY_AFTER_CAP_SECS = DEFAULT_MECH_TIMEOUT[1]
+
+
+def _retry_after_secs(
+    response: requests.Response, *, cap: float = _RETRY_AFTER_CAP_SECS
+) -> float:
     """Return the ``Retry-After`` header in seconds, bounded to ``[1, cap]``."""
     try:
         wait = float(response.headers.get("Retry-After", "1"))
