@@ -37,8 +37,11 @@ from packages.valory.connections.x402.clients.base import PaymentError
 from packages.valory.connections.x402.clients.mech import (
     DEFAULT_MECH_TIMEOUT,
     DEFAULT_REQUEST_TTL_SECS,
+    DEFAULT_TOTAL_DEADLINE_SECS,
+    FACILITATOR_WORST_CASE_SECS,
     MechDeadlineExceededError,
     MechDepositRequiredError,
+    MechOutcomeUnknownError,
     MechRateExceededError,
     MechRequestRejectedError,
     RequesterInfo,
@@ -540,7 +543,8 @@ def test_read_timeout_asks_once_more_for_the_same_request_id() -> None:
     assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
 
 
-def test_second_read_timeout_is_raised() -> None:
+def test_second_read_timeout_is_a_typed_outcome_unknown_error() -> None:
+    """The replay that asks for the outcome failing too is a PaymentError, not a raw Timeout."""
     fake = _FakeFacilitator(
         [
             requests.exceptions.ReadTimeout("slow"),
@@ -549,13 +553,124 @@ def test_second_read_timeout_is_raised() -> None:
     )
     session = _session_with(fake)()
 
-    with _patched(fake), pytest.raises(requests.exceptions.ReadTimeout):
+    with _patched(fake), pytest.raises(MechOutcomeUnknownError) as excinfo:
         session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
+    assert isinstance(excinfo.value, PaymentError)
+    assert "ReadTimeout" in str(excinfo.value)
 
-def test_default_timeout_outlasts_the_facilitator_upstream_deadline() -> None:
-    """The facilitator serves and charges a call for up to its 120s deadline plus RPC reads."""
-    assert DEFAULT_MECH_TIMEOUT[1] > 120
+
+def test_default_timeout_outlasts_the_facilitator_worst_case() -> None:
+    """One POST may sit in the facilitator's admission wait (25s) and then its upstream deadline (120s)."""
+    assert FACILITATOR_WORST_CASE_SECS == 25 + 120
+    assert DEFAULT_MECH_TIMEOUT[1] > FACILITATOR_WORST_CASE_SECS
+
+
+def test_every_send_read_timeout_is_clamped_to_the_remaining_deadline() -> None:
+    """The total deadline bounds each send, not only the waits between them."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake, total_deadline_secs=50.0)()
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    timeouts = [c["timeout"] for c in fake.calls]
+    assert [t[0] for t in timeouts] == [DEFAULT_MECH_TIMEOUT[0]] * 2
+    assert all(0 < t[1] <= 50.0 for t in timeouts)
+
+
+def _deadline_fires_after_the_post(fake: _FakeFacilitator, clock: Dict[str, float]):
+    """Wrap the fake so a read timeout on a POST also uses up the whole call budget."""
+    original = fake.send
+
+    def send(adapter: Any, request: requests.PreparedRequest, **kwargs: Any):
+        try:
+            return original(adapter, request, **kwargs)
+        except requests.exceptions.ReadTimeout:
+            clock["t"] += DEFAULT_TOTAL_DEADLINE_SECS + 1
+            raise
+
+    fake.send = send  # type: ignore[method-assign]
+
+
+def test_unresolved_signed_body_is_replayed_on_the_next_call_for_the_same_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A POST cut off by the deadline is asked for again next time, not signed and paid twice."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
+    assert _posted_body(fake, 0) == _posted_body(fake, 1)
+
+
+def test_unresolved_body_is_dropped_once_the_facilitator_refuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the replay says the old request was never served, a fresh one is signed."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    expired = _json_response(
+        401, {"detail": {"error": "request_expired", "detail": "old", "context": {}}}
+    )
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            expired,
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
+    assert _posted_body(fake, 1) == _posted_body(fake, 0)
+    assert _posted_body(fake, 2)["nonce"] == str(_INFO_JSON["next_nonce"] + 1)
+    assert _posted_body(fake, 2)["request_id"] != _posted_body(fake, 0)["request_id"]
+
+
+def test_unresolved_body_still_in_progress_is_reported_not_resigned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the old request is still being served, the client reports it rather than paying again."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+    in_progress = _json_response(
+        409,
+        {"detail": {"error": "request_in_progress", "detail": "busy", "context": {}}},
+    )
+    in_progress.headers["Retry-After"] = "9999"
+    fake = _FakeFacilitator([requests.exceptions.ReadTimeout("slow"), in_progress])
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        with pytest.raises(MechRequestRejectedError) as excinfo:
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert excinfo.value.error == "request_in_progress"
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
 
 
 def test_expires_at_follows_the_facilitator_clock() -> None:

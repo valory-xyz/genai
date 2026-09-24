@@ -50,16 +50,18 @@ _logger = logging.getLogger(__name__)
 # clamps it to its own cap.
 DEFAULT_REQUEST_TTL_SECS = 120
 DEFAULT_NONCE_RETRIES = 2
-# Must outlast the facilitator's upstream deadline (120s): an abandoned call is still charged.
-DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, 150.0)
+# The facilitator may hold one POST for its admission wait (25s) plus RPC
+# reads plus its upstream deadline (120s); an abandoned call is still charged.
+FACILITATOR_WORST_CASE_SECS = 25.0 + 120.0
+DEFAULT_MECH_TIMEOUT: Tuple[float, float] = (10.0, FACILITATOR_WORST_CASE_SECS + 20.0)
 # How many times to wait out a 409 request_in_progress after a timeout,
 # and a 409 requester_busy (another call from the same Safe in flight).
 DEFAULT_IN_PROGRESS_RETRIES = 3
 DEFAULT_BUSY_RETRIES = 3
 DEFAULT_INFO_RATE_LIMIT_RETRIES = 3
-# Wall-clock cap on one call, all waits and retries included, so a
+# Wall-clock cap on one call, all waits, retries and sends included, so a
 # struggling facilitator cannot hold the connection's single worker for
-# many minutes. One attempt may still run its read timeout past this.
+# many minutes: every send's read timeout is clamped to what is left.
 DEFAULT_TOTAL_DEADLINE_SECS = 300.0
 
 _NONCE_MISMATCH = "nonce_mismatch"
@@ -115,6 +117,14 @@ class MechRateExceededError(PaymentError):
 
 class MechDeadlineExceededError(PaymentError):
     """The call's total wall-clock budget ran out across its waits and retries."""
+
+
+class MechOutcomeUnknownError(PaymentError):
+    """A signed request was sent and the replay that asks for its outcome failed too.
+
+    The facilitator may have served and charged it; the same signed body
+    is replayed first on the next call for the same upstream request.
+    """
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,18 @@ def _max_wait_secs(response: requests.Response) -> float:
         return 0.0
 
 
+def _clamp_timeout(
+    timeout: Union[None, float, Tuple[float, float]], remaining: float
+) -> Union[float, Tuple[float, float]]:
+    """Return ``timeout`` with its read part capped at ``remaining`` seconds."""
+    if timeout is None:
+        return remaining
+    if isinstance(timeout, tuple):
+        connect, read = timeout
+        return (connect, min(read, remaining))
+    return min(timeout, remaining)
+
+
 def _wait_budget_secs(response: requests.Response, default_attempts: int) -> float:
     """Total time worth spending on one 409: the hint if given, else a few Retry-After rounds."""
     hinted = _max_wait_secs(response)
@@ -271,6 +293,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.ttl_secs = ttl_secs
         self.nonce_retries = nonce_retries
         self._default_timeout = default_timeout
+        # (upstream-call key, signed POST) of the last call whose outcome is
+        # unknown; replayed before signing anything new for the same call.
+        self._unresolved: Optional[Tuple[str, requests.PreparedRequest]] = None
         self._origin = urlsplit(self.facilitator_base_url)
 
     def _upstream_call(self, request: requests.PreparedRequest) -> Dict[str, Any]:
@@ -304,16 +329,27 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         if time.monotonic() >= deadline:
             raise MechDeadlineExceededError("mech call exceeded its budget")
 
+    def _send(
+        self, prepared: requests.PreparedRequest, deadline: float, **kwargs: Any
+    ) -> requests.Response:
+        """Send with the read timeout clamped to what is left of ``deadline``."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MechDeadlineExceededError("mech call exceeded its budget")
+        kwargs = dict(kwargs)
+        kwargs["timeout"] = _clamp_timeout(kwargs.get("timeout"), remaining)
+        return super().send(prepared, **kwargs)
+
     def _fetch_info(self, deadline: float, **send_kwargs: Any) -> RequesterInfo:
         url = f"{self.facilitator_base_url}/mech/{self.chain}/requester/{self.safe_address}"
         prepared = requests.Request("GET", url).prepare()
-        response = super().send(prepared, **send_kwargs)
+        response = self._send(prepared, deadline, **send_kwargs)
         for _ in range(DEFAULT_INFO_RATE_LIMIT_RETRIES):
             if response.status_code != 429:
                 break
             # The route is rate limited process-wide; it says when to retry.
             self._wait(deadline, _retry_after_secs(response))
-            response = super().send(prepared, **send_kwargs)
+            response = self._send(prepared, deadline, **send_kwargs)
         if response.status_code != 200:
             parsed = _facilitator_error(response)
             error, detail = (
@@ -381,7 +417,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :return: the facilitator's response.
         """
         try:
-            response = super().send(prepared, **kwargs)
+            response = self._send(prepared, deadline, **kwargs)
             if response.status_code not in _GATEWAY_STATUSES:
                 return response
             _logger.warning(
@@ -391,7 +427,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             _logger.warning("mech request failed; asking for the stored response")
         self._check(deadline)
-        response = super().send(prepared, **kwargs)
+        response = self._replay(prepared, deadline, **kwargs)
         # The original may still be finishing on the facilitator; it says
         # when to ask again and, at most, how long that could take.
         budget: Optional[float] = None
@@ -410,7 +446,50 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 return response
             budget -= wait
             self._wait(deadline, wait)
-            response = super().send(prepared, **kwargs)
+            response = self._replay(prepared, deadline, **kwargs)
+
+    def _replay(
+        self, prepared: requests.PreparedRequest, deadline: float, **kwargs: Any
+    ) -> requests.Response:
+        """Ask again for an already-sent signed body; a transport failure is a typed error."""
+        try:
+            return self._send(prepared, deadline, **kwargs)
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        ) as exc:
+            raise MechOutcomeUnknownError(
+                "mech request was sent but its outcome could not be read: "
+                f"{type(exc).__name__}"
+            ) from exc
+
+    def _resume_unresolved(
+        self, call_key: str, deadline: float, **kwargs: Any
+    ) -> Optional[requests.Response]:
+        """Replay the last unresolved signed body if it was for this same upstream call.
+
+        :param call_key: canonical form of the upstream call being sent.
+        :param deadline: monotonic instant after which no more waiting is done.
+        :param kwargs: adapter send arguments.
+        :return: the stored response, or ``None`` when a fresh request must be signed.
+        """
+        if self._unresolved is None or self._unresolved[0] != call_key:
+            return None
+        _logger.info(
+            "mech call has an unresolved request; asking for its outcome first"
+        )
+        response = self._post_signed(self._unresolved[1], deadline, **kwargs)
+        if 200 <= response.status_code < 300:
+            self._unresolved = None
+            return response
+        parsed = _facilitator_error(response)
+        if parsed is not None and parsed[0] == _IN_PROGRESS:
+            raise MechRequestRejectedError(
+                status_code=response.status_code, error=parsed[0], detail=parsed[1]
+            )
+        # Refused (expired, stale nonce, ...): it was never served, sign afresh.
+        self._unresolved = None
+        return None
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         """Sign the call for the marketplace and post it to the facilitator.
@@ -424,6 +503,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         deadline = time.monotonic() + self.total_deadline_secs
 
         call = self._upstream_call(request)
+        call_key = json.dumps(call, sort_keys=True)
+        resumed = self._resume_unresolved(call_key, deadline, **kwargs)
+        if resumed is not None:
+            return resumed
         info = self._fetch_info(deadline, **kwargs)
         nonce = info.next_nonce
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
@@ -439,14 +522,22 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 data=json.dumps(body),
             ).prepare()
             self._check(deadline)
+            # Remembered until a definite outcome: if the deadline or the
+            # transport fails after this POST, the next call for the same
+            # upstream request replays it instead of paying twice.
+            self._unresolved = (call_key, prepared)
             response = self._post_signed(prepared, deadline, **kwargs)
             if 200 <= response.status_code < 300:
+                self._unresolved = None
                 return response
 
             parsed = _facilitator_error(response)
             if parsed is None:
+                self._unresolved = None
                 return response
             error, detail, context = parsed
+            if error != _IN_PROGRESS:
+                self._unresolved = None
             if response.status_code == 402:
                 raise MechDepositRequiredError(
                     balance=int(context.get("balance", 0)),
@@ -497,6 +588,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
     max_delivery_rate: Optional[int] = None,
     ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
     default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
+    total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
     **kwargs: Any,
 ) -> requests.Session:
     """Create a requests session that pays for calls through the mech marketplace.
@@ -513,6 +605,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
     :param max_delivery_rate: refuse to sign a rate above this (base units).
     :param ttl_secs: how long a signed request stays valid.
     :param default_timeout: timeout applied when the caller passes none.
+    :param total_deadline_secs: wall-clock cap on one call, everything included.
     :param kwargs: passed to ``HTTPAdapter``.
     :return: a session with the mech adapter mounted for http and https.
     """
@@ -526,6 +619,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
         max_delivery_rate=max_delivery_rate,
         ttl_secs=ttl_secs,
         default_timeout=default_timeout,
+        total_deadline_secs=total_deadline_secs,
         **kwargs,
     )
     session.mount("http://", adapter)
