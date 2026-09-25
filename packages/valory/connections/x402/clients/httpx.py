@@ -12,6 +12,7 @@ from packages.valory.connections.x402.clients.base import (
     PaymentError,
     PaymentRejectedAfterRetryError,
     PaymentSelectorCallable,
+    describe_rejection_reason,
     x402Client,
 )
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
@@ -89,10 +90,8 @@ class HttpxHooks:
             if retry_response.status_code == 402:
                 _logger.warning(
                     "x402 retry returned 402 after payment header was attached; "
-                    "upstream still rejects the request."
-                )
-                _logger.debug(
-                    "x402 retry body (truncated): %r", retry_response.content[:500]
+                    "upstream still rejects the request. Gateway reason: %s",
+                    describe_rejection_reason(retry_response.content),
                 )
                 raise PaymentRejectedAfterRetryError(
                     status_code=retry_response.status_code,

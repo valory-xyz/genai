@@ -9,10 +9,10 @@ fingerprint:
   __init__.py: bafybeiaoxruv2hhlkav2d3jl2vtyk7wui3chrl6u74zwlkzmy4iwvcls5y
   chains.py: bafybeig2fxrsffymuknms5j4jctkhczgkncsuwd6i2ai6rt776kedf4uau
   clients/__init__.py: bafybeihbhgodkioxwnls4ek7pwed4gwwdt5kdhpbje66wsapx2nyl2ueg4
-  clients/base.py: bafybeiby3gqwh2geyl4vlrkkyr464cg3xpfwsthdk3xflb7bum76abfn3q
-  clients/httpx.py: bafybeiacwcxc36crgdpaatzz6mt3sy7oir7dgbjv373de6kcnwz5ubwto4
+  clients/base.py: bafybeihazsubdsblliw7yb7hkitfwc5eazvczy6wvajbifmmhlw434cbje
+  clients/httpx.py: bafybeifjx4puybfjfzhdbyimob6hx3bsmb63zjj34gq4c6f26fhb6qn4xe
   clients/mech.py: bafybeihjptjw5ftsi4klih2cr4mtxx34sn5zlk32cmwxh6bxcjdukctq2q
-  clients/requests.py: bafybeif4zgh4aicnnzjfmkjnlysx5af6qcwnnnf3gaphvvzuuxzk4sgbt4
+  clients/requests.py: bafybeigjrbtdpmptzruhqdvqpq6btebds5inuopuruw62ajsfqnbpyat6a
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
   encoding.py: bafybeihr26llqe4e4p5vvk5p7j3z6bdfs6cbqv5tk7i7gtrxf5rd3xhcha
@@ -20,7 +20,7 @@ fingerprint:
   mech_signing.py: bafybeibawu7spyelxo7uaaqp4jneotzz52y2untbxhwf2sn6pj5mklu3c4
   networks.py: bafybeieo34m7hjcbsjx4lhbtjjpqx3lg7m2crm2mnlcdn2tfttygxrdzsa
   tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
-  tests/test_clients.py: bafybeighkb7unnvw3o4zv4pgtxma54rhdyhcrmotp6nkcuc6wbp4uscfqy
+  tests/test_clients.py: bafybeicpzy5eyntw4f45lphvyeej3cgvmvxbjiqdqpi57mhch3ertt6kqu
   tests/test_mech.py: bafybeibvdzqcoirtihma744h5eseqqeaupowgbunnpbbeqmxs4tmhd66da
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []

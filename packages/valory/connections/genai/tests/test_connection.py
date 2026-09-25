@@ -36,7 +36,10 @@ from packages.valory.connections.genai.connection import (
     GENAI_DIRECT_TIMEOUT_SECONDS,
     GenaiConnection,
 )
-from packages.valory.connections.x402.clients.base import PaymentError
+from packages.valory.connections.x402.clients.base import (
+    PaymentError,
+    PaymentRejectedAfterRetryError,
+)
 from packages.valory.connections.x402.clients.mech import MechDepositRequiredError
 
 
@@ -214,6 +217,28 @@ class TestProcessX402RequestPaymentResponseHeader:
         assert error is True
         assert "x402 payment adapter error" in body["error"]
         assert "Genai" not in body["error"]
+
+    def test_rejected_payment_reaches_caller_with_corrected_wording(self) -> None:
+        """The caller-visible payload says the payment was rejected, not accepted.
+
+        The message is interpolated verbatim into the ``{"error": ...}`` payload
+        this connection returns, so the corrected sentence is a contract on the
+        consumer side as much as in the log.
+        """
+        stub = self._make_x402_stub()
+
+        def fake_process(*_a: Any, **_k: Any) -> Any:
+            raise PaymentRejectedAfterRetryError(
+                status_code=402, body=b'{"error": "insufficient_funds"}'
+            )
+
+        stub._process_x402_request = fake_process
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "hi"}')
+        assert error is True
+        assert "the payment was not accepted" in body["error"]
+        assert "after payment was accepted" not in body["error"]
+        assert "insufficient_funds" not in body["error"]
 
     def test_plain_prompt_without_schema_reaches_request(
         self, monkeypatch: pytest.MonkeyPatch
