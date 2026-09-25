@@ -17,7 +17,6 @@ from packages.valory.connections.x402.clients.base import (
 )
 from packages.valory.connections.x402.types import x402PaymentRequiredResponse
 
-
 _logger = logging.getLogger(__name__)
 
 

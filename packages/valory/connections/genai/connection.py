@@ -22,7 +22,7 @@
 
 import json
 import pickle  # nosec
-from typing import Any, Dict, Tuple, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
 import google.generativeai as genai  # type: ignore
 import requests  # type: ignore[import-untyped]
@@ -37,6 +37,10 @@ from packages.valory.connections.genai.utils import pydantic_to_gemini_schema
 from packages.valory.connections.x402.clients.base import (
     PaymentError,
     decode_x_payment_response,
+)
+from packages.valory.connections.x402.clients.mech import (
+    MechDepositRequiredError,
+    mech_requests,
 )
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
@@ -57,6 +61,9 @@ REQUIRED_PROPERTIES_IN_PAYLOAD = ["prompt"]
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 GENERATE_ENDPOINT = "generateContent"
+# Gemini REST prefix the facilitator forwards to, same as the x402 proxy.
+GEMINI_UPSTREAM_PREFIX = "/v1beta"
+MECH_API = "chat"
 
 # Forwarded to the SDK as ``request_options.timeout`` so the deadline is
 # enforced inside gRPC where the actual blocking I/O happens. A slow
@@ -94,6 +101,31 @@ class SrrDialogues(BaseSrrDialogues):
         )
 
 
+def _check_payment_flags(
+    logger: Any,
+    use_x402: Any,
+    use_mech_facilitator: bool,
+    mech_max_delivery_rate: Any = None,
+) -> None:
+    """Warn at construction about a mech configuration that cannot work as intended.
+
+    :param logger: the connection logger.
+    :param use_x402: the ``use_x402`` config value.
+    :param use_mech_facilitator: the ``use_mech_facilitator`` config value.
+    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value.
+    """
+    if use_mech_facilitator and not use_x402:
+        logger.warning(
+            "use_mech_facilitator is set but use_x402 is off; the mech "
+            "facilitator is only used on the paid path, so this flag is ignored"
+        )
+    if use_mech_facilitator and mech_max_delivery_rate is None:
+        logger.warning(
+            "use_mech_facilitator is set without mech_max_delivery_rate; every "
+            "mech call will be refused until a cap is configured"
+        )
+
+
 class GenaiConnection(BaseSyncConnection):
     """Proxy to the functionality of the Genai library."""
 
@@ -125,6 +157,30 @@ class GenaiConnection(BaseSyncConnection):
         self.genai_x402_server_base_url = self.configuration.config.get(
             "genai_x402_server_base_url"
         )
+        # Only consulted when use_x402 is on.
+        self.use_mech_facilitator = bool(
+            self.configuration.config.get("use_mech_facilitator", False)
+        )
+        _check_payment_flags(
+            self.logger,
+            self.use_x402,
+            self.use_mech_facilitator,
+            self.configuration.config.get("mech_max_delivery_rate"),
+        )
+        self.mech_facilitator_base_url = self.configuration.config.get(
+            "mech_facilitator_base_url"
+        )
+        self.mech_chain = self.configuration.config.get("mech_chain")
+        self.mech_safe_addresses: Dict[str, str] = dict(
+            self.configuration.config.get("mech_safe_addresses") or {}
+        )
+        self.mech_max_delivery_rate = self.configuration.config.get(
+            "mech_max_delivery_rate"
+        )
+        # Built once and reused: the mech adapter remembers a signed request
+        # whose outcome is unknown and replays it on the next identical
+        # call, which only works if one session serves every request.
+        self._mech_session: Optional[requests.Session] = None
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
@@ -200,17 +256,54 @@ class GenaiConnection(BaseSyncConnection):
         # pylint: disable=no-value-for-parameter
         return Account.from_key(private_key=self.connection_private_key)
 
+    def _paid_session_and_base_url(self) -> Tuple[requests.Session, str]:
+        """Return the paid session (mech or x402) and the base URL for Gemini paths.
+
+        :return: the session and the base URL.
+        """
+        if not self.use_mech_facilitator:
+            return x402_requests(self._eoa_account), str(
+                self.genai_x402_server_base_url
+            )
+        chain = str(self.mech_chain).lower()
+        safe_address = next(
+            (v for k, v in self.mech_safe_addresses.items() if str(k).lower() == chain),
+            None,
+        )
+        if not safe_address or not self.mech_facilitator_base_url:
+            raise PaymentError(
+                "mech facilitator enabled but mech_facilitator_base_url or the "
+                f"Safe address for chain {chain!r} is not configured"
+            )
+        if self.mech_max_delivery_rate is None:
+            # Without a cap the agent would sign whatever rate the
+            # facilitator reports, so one bad rate could drain the deposit.
+            raise PaymentError(
+                "mech facilitator enabled but mech_max_delivery_rate is not set"
+            )
+        if self._mech_session is None:
+            self._mech_session = mech_requests(
+                self._eoa_account,
+                safe_address=safe_address,
+                chain=chain,
+                api=MECH_API,
+                facilitator_base_url=str(self.mech_facilitator_base_url),
+                max_delivery_rate=int(self.mech_max_delivery_rate),
+            )
+        base_url = str(self.mech_facilitator_base_url).rstrip("/")
+        return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
+
     def _process_x402_request(
         self,
         payload: dict,
         model_name: str,
         generation_config_kwargs: dict,
     ) -> Tuple[str, bool]:
-        session = x402_requests(self._eoa_account)
+        session, base_url = self._paid_session_and_base_url()
 
         # Make request
-        url = f"{self.genai_x402_server_base_url}/models/{model_name}:generateContent"
-        self.logger.info(f"Sending x402-paid request to {url}")
+        url = f"{base_url}/models/{model_name}:generateContent"
+        self.logger.info(f"Sending paid request to {url}")
 
         data: Dict = {
             "contents": [{"parts": [{"text": payload["prompt"]}]}],
@@ -256,7 +349,9 @@ class GenaiConnection(BaseSyncConnection):
                 "Payment response transaction hash: "
                 f"{payment_response.get('transaction', '<missing>')}"
             )
-        else:
+        elif not self.use_mech_facilitator:
+            # Mech-settled calls carry no payment header; the marketplace
+            # settlement happens later in a batch.
             self.logger.warning("Warning: No payment response header found")
 
         candidates = result.get("candidates") or [{}]
@@ -331,6 +426,18 @@ class GenaiConnection(BaseSyncConnection):
                 )
                 response_text = response.text  # type: ignore
                 error = False
+        except MechDepositRequiredError as e:
+            # Structured so the skill can trigger a pre-deposit top-up.
+            return {
+                "error": f"mech pre-deposit required: {e}",
+                "code": "mech_deposit_required",
+                "context": {
+                    "balance": e.balance,
+                    "reserved": e.reserved,
+                    "available": e.available,
+                    "required": e.required,
+                },
+            }, True
         except PaymentError as e:
             return {"error": f"x402 payment adapter error: {e}"}, True
         except Exception as e:  # pylint: disable=broad-except
