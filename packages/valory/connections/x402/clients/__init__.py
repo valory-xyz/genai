@@ -6,6 +6,15 @@ from packages.valory.connections.x402.clients.base import (
     decode_x_payment_response,
     x402Client,
 )
+from packages.valory.connections.x402.clients.mech import (
+    MechDeadlineExceededError,
+    MechDepositRequiredError,
+    MechHTTPAdapter,
+    MechOutcomeUnknownError,
+    MechRateExceededError,
+    MechRequestRejectedError,
+    mech_requests,
+)
 from packages.valory.connections.x402.clients.requests import (
     x402HTTPAdapter,
     x402_http_adapter,
@@ -19,4 +28,11 @@ __all__ = [
     "x402HTTPAdapter",
     "x402_http_adapter",
     "x402_requests",
+    "MechDeadlineExceededError",
+    "MechDepositRequiredError",
+    "MechHTTPAdapter",
+    "MechOutcomeUnknownError",
+    "MechRateExceededError",
+    "MechRequestRejectedError",
+    "mech_requests",
 ]
