@@ -155,6 +155,7 @@ class TestProcessX402RequestPaymentResponseHeader:
                 "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
             ),
             _eoa_account=MagicMock(),  # the session factories are monkeypatched away
+            _mech_session=None,
         )
         for key, value in overrides.items():
             setattr(stub, key, value)
@@ -540,6 +541,39 @@ class TestMechFacilitatorPath:
         assert seen["facilitator_base_url"] == "http://facilitator.example"
         assert seen["max_delivery_rate"] == 12000
         assert base_url == "http://facilitator.example/v1beta"
+
+    def test_mech_session_is_built_once_and_reused_across_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two paid requests share one mech session, so its replay memory survives between them."""
+        stub = self._stub(use_mech_facilitator=True, mech_max_delivery_rate=12000)
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "hello"}]}}]
+        }
+        fake_response.headers = {}
+        sessions: list = []
+
+        def fake_mech(*_a: Any, **_k: Any) -> Any:
+            session = MagicMock()
+            session.post.return_value = fake_response
+            sessions.append(session)
+            return session
+
+        monkeypatch.setattr(genai_connection, "mech_requests", fake_mech)
+
+        for _ in range(2):
+            text, error = GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs={},
+            )
+            assert (text, error) == ("hello", False)
+
+        assert len(sessions) == 1
+        assert sessions[0].post.call_count == 2
+        assert stub._mech_session is sessions[0]
 
     def test_flag_on_without_a_safe_for_the_chain_is_a_payment_error(self) -> None:
         """Misconfiguration surfaces as a PaymentError, not a KeyError."""

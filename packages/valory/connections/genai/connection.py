@@ -22,7 +22,7 @@
 
 import json
 import pickle  # nosec
-from typing import Any, Dict, Tuple, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
 import google.generativeai as genai  # type: ignore
 import requests  # type: ignore[import-untyped]
@@ -177,6 +177,10 @@ class GenaiConnection(BaseSyncConnection):
         self.mech_max_delivery_rate = self.configuration.config.get(
             "mech_max_delivery_rate"
         )
+        # Built once and reused: the mech adapter remembers a signed request
+        # whose outcome is unknown and replays it on the next identical
+        # call, which only works if one session serves every request.
+        self._mech_session: Optional[requests.Session] = None
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
@@ -277,16 +281,17 @@ class GenaiConnection(BaseSyncConnection):
             raise PaymentError(
                 "mech facilitator enabled but mech_max_delivery_rate is not set"
             )
-        session = mech_requests(
-            self._eoa_account,
-            safe_address=safe_address,
-            chain=chain,
-            api=MECH_API,
-            facilitator_base_url=str(self.mech_facilitator_base_url),
-            max_delivery_rate=int(self.mech_max_delivery_rate),
-        )
+        if self._mech_session is None:
+            self._mech_session = mech_requests(
+                self._eoa_account,
+                safe_address=safe_address,
+                chain=chain,
+                api=MECH_API,
+                facilitator_base_url=str(self.mech_facilitator_base_url),
+                max_delivery_rate=int(self.mech_max_delivery_rate),
+            )
         base_url = str(self.mech_facilitator_base_url).rstrip("/")
-        return session, base_url + GEMINI_UPSTREAM_PREFIX
+        return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
 
     def _process_x402_request(
         self,
