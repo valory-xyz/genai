@@ -14,7 +14,7 @@ fingerprint:
   utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeidjfdgkrag52de3flg5ggwrsrhd67cinwwg5d2upx3du66a75syde
+- valory/x402:0.1.0:bafybeihqyd5xkqmkzfodt4ealonxqksc4kd2i4icxkq7o6paxlvp2xm5hu
 protocols:
 - valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection

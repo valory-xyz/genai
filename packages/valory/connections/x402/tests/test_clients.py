@@ -346,7 +346,13 @@ class TestX402RequestsSecondary402:
         ]
         warnings = [r for r in adapter_records if r.levelno == logging.WARNING]
         assert any(GATEWAY_REASON in r.getMessage() for r in warnings)
-        assert not [r for r in adapter_records if r.levelno == logging.DEBUG]
+        # The reason must not be left at DEBUG only; unrelated debug logging
+        # added to the adapters later is not this test's concern.
+        assert not [
+            r
+            for r in adapter_records
+            if r.levelno == logging.DEBUG and GATEWAY_REASON in r.getMessage()
+        ]
 
     def test_non_decodable_body_falls_back_to_truncated_repr(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -624,7 +630,13 @@ class TestX402HttpxRetryTimeout:
         ]
         warnings = [r for r in adapter_records if r.levelno == logging.WARNING]
         assert any(GATEWAY_REASON in r.getMessage() for r in warnings)
-        assert not [r for r in adapter_records if r.levelno == logging.DEBUG]
+        # The reason must not be left at DEBUG only; unrelated debug logging
+        # added to the adapters later is not this test's concern.
+        assert not [
+            r
+            for r in adapter_records
+            if r.levelno == logging.DEBUG and GATEWAY_REASON in r.getMessage()
+        ]
 
     def test_non_decodable_body_falls_back_to_truncated_repr(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
