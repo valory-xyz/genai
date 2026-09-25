@@ -121,11 +121,14 @@ class x402HTTPAdapter(HTTPAdapter):
             return response
 
         except (PaymentError, concurrent.futures.CancelledError):
-            self._is_retry = False
             raise
         except Exception as e:
-            self._is_retry = False
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e
+        finally:
+            # The paid retry goes straight to ``super().send``, so nothing
+            # else clears this: without the reset the next call through the
+            # same session takes the branch above and is sent unpaid.
+            self._is_retry = False
 
 
 def x402_http_adapter(
