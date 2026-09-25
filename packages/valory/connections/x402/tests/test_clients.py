@@ -458,3 +458,70 @@ class TestX402HttpxRetryTimeout:
 
         assert len(header_calls) == 2
         assert hooks._is_retry is False
+
+
+class TestX402RetryFlagIsNotLeaked:
+    """Every call through one session must pay; the retry flag is per call."""
+
+    @staticmethod
+    def _challenge() -> Any:
+        response = MagicMock()
+        response.status_code = 402
+        response.headers = {}
+        response.cookies = {}
+        response.is_redirect = False
+        response.is_permanent_redirect = False
+        response.history = []
+        response.url = "http://example.com/"
+        response.elapsed = datetime.timedelta(seconds=0)
+        response.content = json.dumps(
+            {
+                "x402Version": 1,
+                "error": "No X-PAYMENT header provided",
+                "accepts": [
+                    {
+                        "scheme": "exact",
+                        "network": "base-sepolia",
+                        "maxAmountRequired": "1000",
+                        "resource": "http://example.com/",
+                        "description": "",
+                        "mimeType": "",
+                        "payTo": "0x" + "11" * 20,
+                        "maxTimeoutSeconds": 60,
+                        "asset": "0x" + "22" * 20,
+                        "extra": {"name": "USD Coin", "version": "2"},
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        return response
+
+    def test_a_second_call_on_the_same_session_still_pays(self) -> None:
+        """A paid retry must not leave the next call to be sent unpaid.
+
+        The retry goes straight to ``HTTPAdapter.send``, so if the adapter
+        does not clear its own flag the following request takes the
+        "already retrying" branch and reaches the server with no payment
+        header, which the server answers 402.
+        """
+        session = x402_requests(Account.create())
+        paid_headers: list = []
+
+        def send(_self_inner: object, request: Any, **kwargs: object) -> object:
+            header = request.headers.get("X-Payment")
+            paid_headers.append(header)
+            if header is None:
+                return TestX402RetryFlagIsNotLeaked._challenge()
+            return _fake_super_send(_self_inner, request, **kwargs)
+
+        with patch.object(
+            requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=send
+        ):
+            first = session.get("http://example.com/")
+            second = session.get("http://example.com/")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        # Each call: one unpaid probe that gets the challenge, one paid retry.
+        assert [h is None for h in paid_headers] == [True, False, True, False]
+
