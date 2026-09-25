@@ -23,6 +23,7 @@
 
 import base64
 import json
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import patch
@@ -245,6 +246,13 @@ def _session_with(
         )
 
     return _make
+
+
+def _patched_send(side_effect: Any):
+    """Patch ``HTTPAdapter.send`` with an arbitrary stand-in."""
+    return patch.object(
+        requests.adapters.HTTPAdapter, "send", autospec=True, side_effect=side_effect
+    )
 
 
 def _patched(fake: _FakeFacilitator):
@@ -576,7 +584,10 @@ def test_every_send_read_timeout_is_clamped_to_the_remaining_deadline() -> None:
 
     timeouts = [c["timeout"] for c in fake.calls]
     assert [t[0] for t in timeouts] == [DEFAULT_MECH_TIMEOUT[0]] * 2
-    assert all(0 < t[1] <= 50.0 for t in timeouts)
+    # A coarse monotonic clock (Windows) can read the same instant twice, and
+    # float rounding then leaves the remaining budget an ulp above it.
+    assert all(0 < t[1] <= 50.0 + 1e-6 for t in timeouts)
+    assert all(t[1] < DEFAULT_MECH_TIMEOUT[1] for t in timeouts)
 
 
 def _deadline_fires_after_the_post(fake: _FakeFacilitator, clock: Dict[str, float]):
@@ -956,3 +967,50 @@ def test_without_a_hint_the_busy_wait_keeps_its_default_rounds(
 
     assert excinfo.value.error == "requester_busy"
     assert len([c for c in fake.calls if c["method"] == "POST"]) == 4
+
+
+def test_two_threads_on_one_session_take_turns() -> None:
+    """The facilitator serves one request per Safe, so the session serialises them."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY) for _ in range(2)])
+    session = _session_with(fake)()
+    overlap = {"max": 0, "now": 0}
+    counter_lock = threading.Lock()
+    results: list = []
+
+    def slow_send(adapter: Any, request: requests.PreparedRequest, **kwargs: Any):
+        if request.method == "POST":
+            with counter_lock:
+                overlap["now"] += 1
+                overlap["max"] = max(overlap["max"], overlap["now"])
+            time.sleep(0.2)
+            with counter_lock:
+                overlap["now"] -= 1
+        return fake.send(adapter, request, **kwargs)
+
+    def call() -> None:
+        results.append(
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1}).status_code
+        )
+
+    with _patched_send(slow_send):
+        threads = [threading.Thread(target=call) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert results == [200, 200]
+    assert overlap["max"] == 1  # never two signed posts in flight on one session
+
+
+def test_waiting_for_the_session_past_the_deadline_gives_up() -> None:
+    """A thread that cannot get its turn in time fails instead of stalling the caller."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake, total_deadline_secs=0.3)()
+    adapter = session.get_adapter(_FACILITATOR)
+    adapter._lock.acquire()  # stand in for another thread mid-call
+    try:
+        with _patched(fake), pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+    finally:
+        adapter._lock.release()

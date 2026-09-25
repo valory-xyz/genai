@@ -27,6 +27,7 @@ call into a Safe-signed marketplace request on ``/mech/{api}/{chain}``.
 import base64
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -296,6 +297,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         # (upstream-call key, signed POST) of the last call whose outcome is
         # unknown; replayed before signing anything new for the same call.
         self._unresolved: Optional[Tuple[str, requests.PreparedRequest]] = None
+        # The facilitator serves one request per Safe at a time, and the
+        # unresolved slot above is shared, so callers that use one session
+        # from several threads take turns rather than racing each other.
+        self._lock = threading.Lock()
         self._origin = urlsplit(self.facilitator_base_url)
 
     def _upstream_call(self, request: requests.PreparedRequest) -> Dict[str, Any]:
@@ -500,8 +505,28 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         """
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = self._default_timeout
+        # Started before the lock, so time spent waiting for another thread
+        # counts against this call's budget instead of extending it.
         deadline = time.monotonic() + self.total_deadline_secs
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise MechDeadlineExceededError(
+                "mech call gave up waiting for another request on this session"
+            )
+        try:
+            return self._send_locked(request, deadline, **kwargs)
+        finally:
+            self._lock.release()
 
+    def _send_locked(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self, request: requests.PreparedRequest, deadline: float, **kwargs: Any
+    ) -> requests.Response:
+        """Run one signed call; the caller holds the per-session lock.
+
+        :param request: the caller's prepared request to the upstream path.
+        :param deadline: monotonic instant after which the call gives up.
+        :param kwargs: adapter send arguments.
+        :return: the upstream response as returned by the facilitator.
+        """
         call = self._upstream_call(request)
         call_key = json.dumps(call, sort_keys=True)
         resumed = self._resume_unresolved(call_key, deadline, **kwargs)
