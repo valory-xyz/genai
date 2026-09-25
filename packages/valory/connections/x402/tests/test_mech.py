@@ -584,7 +584,10 @@ def test_every_send_read_timeout_is_clamped_to_the_remaining_deadline() -> None:
 
     timeouts = [c["timeout"] for c in fake.calls]
     assert [t[0] for t in timeouts] == [DEFAULT_MECH_TIMEOUT[0]] * 2
-    assert all(0 < t[1] <= 50.0 for t in timeouts)
+    # A coarse monotonic clock (Windows) can read the same instant twice, and
+    # float rounding then leaves the remaining budget an ulp above it.
+    assert all(0 < t[1] <= 50.0 + 1e-6 for t in timeouts)
+    assert all(t[1] < DEFAULT_MECH_TIMEOUT[1] for t in timeouts)
 
 
 def _deadline_fires_after_the_post(fake: _FakeFacilitator, clock: Dict[str, float]):
