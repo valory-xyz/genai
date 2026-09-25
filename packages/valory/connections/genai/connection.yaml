@@ -14,7 +14,7 @@ fingerprint:
   utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeibfbpioietftw44zdph4spel6krf2jlnvuklg2fijjc74foutyrhi
+- valory/x402:0.1.0:bafybeiaaf54m66o7vlbypkrx6qfw5ifroik6xoxzdyojqzwkd6dmheqmzu
 protocols:
 - valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection
@@ -22,6 +22,11 @@ config:
   genai_api_key: null
   use_x402: false
   genai_x402_server_base_url: http://0.0.0.0:11300
+  use_mech_facilitator: false
+  mech_facilitator_base_url: http://0.0.0.0:11300
+  mech_chain: optimism
+  mech_safe_addresses: {}
+  mech_max_delivery_rate: null
 excluded_protocols: []
 restricted_to_protocols: []
 dependencies:
