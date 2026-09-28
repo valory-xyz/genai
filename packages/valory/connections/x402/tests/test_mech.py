@@ -379,9 +379,8 @@ def test_nonce_collision_retries_at_the_reported_slot() -> None:
     assert _posted_body(fake, 0)["request_id"] != _posted_body(fake, 1)["request_id"]
 
 
-def test_nonce_retries_are_bounded() -> None:
-    """After the configured retries a persistent 409 surfaces as a rejection."""
-    collision = _json_response(
+def _collision_response() -> Any:
+    return _json_response(
         409,
         {
             "detail": {
@@ -391,15 +390,43 @@ def test_nonce_retries_are_bounded() -> None:
             }
         },
     )
-    fake = _FakeFacilitator([collision, collision, collision])
-    session = _session_with(fake, nonce_retries=2)()
 
-    with _patched(fake), pytest.raises(MechRequestRejectedError) as excinfo:
+
+def test_nonce_collisions_retry_until_the_deadline_not_a_fixed_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The slot clears when the request ahead settles, which outlasts two tries.
+
+    A settlement tick is far longer than a couple of retries, so giving up
+    on a count turns a wait into a failure. The budget is the only bound.
+    """
+    fake = _FakeFacilitator([_collision_response() for _ in range(50)])
+    session = _session_with(
+        fake,
+        total_deadline_secs=20.0,
+        nonce_retry_wait_secs=2.0,
+        min_call_budget_secs=0.0,
+    )()
+    clock = _fake_clock(monkeypatch)
+
+    with _patched(fake), pytest.raises(MechDeadlineExceededError):
         session.get(f"{_FACILITATOR}/x")
 
-    assert excinfo.value.status_code == 409
-    assert excinfo.value.error == "nonce_mismatch"
-    assert len([c for c in fake.calls if c["method"] == "POST"]) == 3
+    posts = [c for c in fake.calls if c["method"] == "POST"]
+    assert len(posts) == 10  # posted at 0s, 2s, ... 18s
+    assert clock["t"] == 20.0  # the last wait lands on the deadline
+
+
+def test_a_call_with_too_little_budget_left_is_refused_before_it_signs() -> None:
+    """The facilitator charges for a call it served, even if the client walked away."""
+    fake = _FakeFacilitator([])
+    session = _session_with(fake, total_deadline_secs=5.0, min_call_budget_secs=30.0)()
+
+    with _patched(fake), pytest.raises(MechDeadlineExceededError) as excinfo:
+        session.get(f"{_FACILITATOR}/x")
+
+    assert "below the 30s needed" in str(excinfo.value)
+    assert fake.calls == []  # nothing signed, nothing posted, nothing charged
 
 
 def test_402_raises_a_typed_deposit_error_with_the_shortfall() -> None:
@@ -1014,3 +1041,81 @@ def test_waiting_for_the_session_past_the_deadline_gives_up() -> None:
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
     finally:
         adapter._lock.release()
+
+
+def test_two_sessions_for_one_safe_take_turns() -> None:
+    """The nonce belongs to the Safe, so a per-session lock would let them race.
+
+    An agent holds one session per upstream api, all paying from the same
+    Safe. If two of them sign at once they pick the same slot.
+    """
+    account = Account.create()
+    fake = _FakeFacilitator([])
+    coingecko = _session_with(fake, account, api="coingecko")()
+    chat = _session_with(fake, account, api="chat")()
+
+    signing = {"now": 0, "most": 0}
+    guard = threading.Lock()
+
+    def _hold(_adapter: Any, request: requests.PreparedRequest, **_kwargs: Any) -> Any:
+        if request.method == "GET":
+            return _response(
+                200,
+                json.dumps(_INFO_JSON).encode("utf-8"),
+                {"content-type": "application/json"},
+            )
+        with guard:
+            signing["now"] += 1
+            signing["most"] = max(signing["most"], signing["now"])
+        time.sleep(0.2)
+        with guard:
+            signing["now"] -= 1
+        return _response(200, _UPSTREAM_BODY)
+
+    with _patched_send(_hold):
+        threads = [
+            threading.Thread(target=lambda: coingecko.get(f"{_FACILITATOR}/a")),
+            threading.Thread(target=lambda: chat.get(f"{_FACILITATOR}/b")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10.0)
+
+    assert signing["most"] == 1  # never both at the facilitator at once
+
+
+def test_a_second_call_does_not_discard_the_first_ones_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two calls, one unresolved: the unresolved one must still replay.
+
+    A single stored slot let the second call overwrite the first one's
+    body, so the first was signed and paid for a second time instead of
+    being asked about. A replay skips the info read, so the call sequence
+    is what tells the two apart.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),  # call A, outcome unknown
+            _response(200, _UPSTREAM_BODY),  # call B, clean
+            _response(200, _UPSTREAM_BODY),  # call A replayed
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/a", json={"p": 1})
+        clock["t"] = 1_000.0  # a fresh call, fresh budget
+        session.post(f"{_FACILITATOR}/b", json={"p": 2})
+        clock["t"] = 1_000.0
+        replayed = session.post(f"{_FACILITATOR}/a", json={"p": 1})
+
+    assert replayed.status_code == 200
+    # A's last POST is a replay: no info read before it. Losing the stored
+    # body would sign afresh, which reads info first.
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST", "POST"]

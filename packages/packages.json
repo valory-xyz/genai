@@ -2,8 +2,8 @@
     "dev": {
         "protocol/valory/srr/0.1.0": "bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4",
         "protocol/valory/llm/1.0.0": "bafybeia5vtojmw2mbc2uyukv3lciwm5gdyp4drrh4bkazqs3dlbk3u6hoa",
-        "connection/valory/x402/0.1.0": "bafybeicrpi2kg2mlyofmfvsyiax6ty3zyoms5yblsfa3omd3ropnxrrl7y",
-        "connection/valory/genai/0.1.0": "bafybeib6sjeofpgumintbax6fxqem42bhy63icydj6z3ctrcafodsmvbnm",
+        "connection/valory/x402/0.1.0": "bafybeifqx5xr735xkr7smmf2p6gxbf4ych6lx3l5bpqng2ksjgkinxllze",
+        "connection/valory/genai/0.1.0": "bafybeiegyskknhrt5gl42yerugtjxpzbwx43ltayjtjan75f6vobvjektu",
         "connection/valory/openai/0.1.0": "bafybeihdg3jlch6geqxbnfnbrq6kbserhyh2sil4b237qh7s44lr2jzs3e"
     },
     "third_party": {}
