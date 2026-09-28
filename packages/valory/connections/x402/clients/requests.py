@@ -45,7 +45,6 @@ class x402HTTPAdapter(HTTPAdapter):
         """
         super().__init__(**kwargs)
         self.client = client
-        self._is_retry = False
         self._default_timeout = default_timeout
 
     def send(self, request, **kwargs):
@@ -66,10 +65,6 @@ class x402HTTPAdapter(HTTPAdapter):
         """
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = self._default_timeout
-
-        if self._is_retry:
-            self._is_retry = False
-            return super().send(request, **kwargs)
 
         response = super().send(request, **kwargs)
 
@@ -94,8 +89,8 @@ class x402HTTPAdapter(HTTPAdapter):
                 selected_requirements, payment_response.x402_version
             )
 
-            # Mark as retry and add payment header
-            self._is_retry = True
+            # The retry goes straight to ``super().send``, so it cannot
+            # re-enter this method and no re-entry guard is needed.
             request.headers["X-Payment"] = payment_header
             request.headers["Access-Control-Expose-Headers"] = "X-Payment-Response"
 
@@ -121,10 +116,8 @@ class x402HTTPAdapter(HTTPAdapter):
             return response
 
         except (PaymentError, concurrent.futures.CancelledError):
-            self._is_retry = False
             raise
         except Exception as e:
-            self._is_retry = False
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e
 
 
