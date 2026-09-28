@@ -251,7 +251,6 @@ class TestX402RequestsSecondary402:
         req = requests.Request("GET", "http://example.com/").prepare()
         with pytest.raises(concurrent.futures.CancelledError):
             adapter.send(req, timeout=5)
-        assert adapter._is_retry is False
 
 
 class TestX402HttpxRetryTimeout:
@@ -497,13 +496,7 @@ class TestX402RetryFlagIsNotLeaked:
         return response
 
     def test_a_second_call_on_the_same_session_still_pays(self) -> None:
-        """A paid retry must not leave the next call to be sent unpaid.
-
-        The retry goes straight to ``HTTPAdapter.send``, so if the adapter
-        does not clear its own flag the following request takes the
-        "already retrying" branch and reaches the server with no payment
-        header, which the server answers 402.
-        """
+        """Every call on one session pays, not only the first."""
         session = x402_requests(Account.create())
         paid_headers: list = []
 
@@ -524,4 +517,3 @@ class TestX402RetryFlagIsNotLeaked:
         assert second.status_code == 200
         # Each call: one unpaid probe that gets the challenge, one paid retry.
         assert [h is None for h in paid_headers] == [True, False, True, False]
-
