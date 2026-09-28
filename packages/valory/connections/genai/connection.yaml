@@ -10,11 +10,11 @@ fingerprint:
   connection.py: bafybeihi5ja2abojuniu6xzmv47hqahiabkwoiefbpdxomnwtk5t5m2hr4
   readme.md: bafybeie75rbyg3e3gr5uont6auovnsktfbwugafzoy43zpqhvuaotxqlbu
   tests/__init__.py: bafybeihe2ir2kxisz74cvq3b3ou2awfunkz46gu4lutdw77nvl5fpvs4rq
-  tests/test_connection.py: bafybeihs6kehdix2zijwbs6nrjxkpfg2zowjt2y7nfmgdku567fnjunjr4
+  tests/test_connection.py: bafybeibprxkrpkr5r7q3u2dia6ylkkijlktgesqsgjbi767eiqbzp6love
   utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeifj4ysexo26l5532yqirvxw3lip7wye5c3jpdjw336zzdpda6njhy
+- valory/x402:0.1.0:bafybeib3kws7nzrslstl5od5kosbmqdr334bn2ari5qxzvafmfcvemcxaq
 protocols:
 - valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection
