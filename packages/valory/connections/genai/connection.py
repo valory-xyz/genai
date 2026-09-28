@@ -58,6 +58,32 @@ AVAILABLE_MODELS = [
     "gemini-2.0-flash-lite",
 ]
 REQUIRED_PROPERTIES_IN_PAYLOAD = ["prompt"]
+# Optional payload key: the lowest marketplace slot this call may be signed
+# at. An agent that also sends mech requests of its own from the same Safe
+# passes the slot above whatever it is holding, because the facilitator
+# cannot see those and would otherwise hand out one of them.
+MECH_NONCE_FLOOR_KEY = "mech_nonce_floor"
+
+
+def read_nonce_floor(payload: dict) -> Optional[int]:
+    """Return the payload's slot floor, or ``None`` when absent or unusable.
+
+    :param payload: the SRR request payload.
+    :return: the floor, or ``None``.
+
+    A malformed floor is dropped rather than raised on: the call is still
+    payable at the facilitator's own slot, and refusing it would turn a
+    bad field into a dead agent.
+    """
+    if MECH_NONCE_FLOOR_KEY not in payload:
+        return None
+    try:
+        floor = int(payload[MECH_NONCE_FLOOR_KEY])
+    except (TypeError, ValueError):
+        return None
+    return floor if floor >= 0 else None
+
+
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 GENERATE_ENDPOINT = "generateContent"
@@ -181,6 +207,9 @@ class GenaiConnection(BaseSyncConnection):
         # whose outcome is unknown and replays it on the next identical
         # call, which only works if one session serves every request.
         self._mech_session: Optional[requests.Session] = None
+        # Lowest slot the next mech call may sign at, taken from the
+        # request payload. ``None`` leaves the facilitator's own answer.
+        self._mech_nonce_floor: Optional[int] = None
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
@@ -284,6 +313,7 @@ class GenaiConnection(BaseSyncConnection):
         if self._mech_session is None:
             self._mech_session = mech_requests(
                 self._eoa_account,
+                nonce_source=self._mech_nonce_source,
                 safe_address=safe_address,
                 chain=chain,
                 api=MECH_API,
@@ -292,6 +322,21 @@ class GenaiConnection(BaseSyncConnection):
             )
         base_url = str(self.mech_facilitator_base_url).rstrip("/")
         return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
+
+    def _mech_nonce_source(self, info: Any) -> int:
+        """Return the slot to sign the next mech call at.
+
+        :param info: the facilitator's requester info.
+        :return: the facilitator's next free slot, or the floor if higher.
+
+        The facilitator works its answer out from the on-chain counter
+        plus its own unsettled rows. It cannot see slots held by anything
+        else paying from the same Safe, so an agent that sends mech
+        requests of its own passes a floor above whatever it holds.
+        """
+        if self._mech_nonce_floor is None:
+            return int(info.next_nonce)
+        return max(int(info.next_nonce), self._mech_nonce_floor)
 
     def _process_x402_request(
         self,
@@ -410,6 +455,7 @@ class GenaiConnection(BaseSyncConnection):
         try:
             if self.use_x402:
                 self.logger.debug("Using x402 to make the request")
+                self._mech_nonce_floor = read_nonce_floor(payload)
                 response = self._process_x402_request(
                     payload, model_name, generation_config_kwargs
                 )
