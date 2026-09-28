@@ -354,8 +354,12 @@ def test_get_request_has_empty_body_and_carries_the_query() -> None:
     assert fake.calls[1]["url"] == f"{_FACILITATOR}/mech/coingecko/{_CHAIN}"
 
 
-def test_nonce_collision_retries_at_the_reported_slot() -> None:
-    """A 409 nonce_mismatch is retried once at the slot the facilitator names."""
+def test_a_refused_slot_is_re_asked_of_the_source_not_taken_from_the_response() -> None:
+    """The facilitator's ``expected`` only accounts for its own unsettled rows.
+
+    When something else pays from the same Safe, that number points at a
+    slot the other writer is holding, so taking it would collide again.
+    """
     collision = _json_response(
         409,
         {
@@ -367,6 +371,7 @@ def test_nonce_collision_retries_at_the_reported_slot() -> None:
         },
     )
     fake = _FakeFacilitator([collision, _response(200, _UPSTREAM_BODY)])
+    fake.info_after_post = {**_INFO_JSON, "next_nonce": 11, "on_chain_nonce": 11}
     session = _session_with(fake)()
 
     with _patched(fake):
@@ -374,9 +379,27 @@ def test_nonce_collision_retries_at_the_reported_slot() -> None:
 
     assert response.status_code == 200
     assert _posted_body(fake, 0)["nonce"] == "7"
-    assert _posted_body(fake, 1)["nonce"] == "9"
-    # The signature was rebuilt for the new nonce, not reused.
+    # 11 from the fresh read, not the 9 the 409 named.
+    assert _posted_body(fake, 1)["nonce"] == "11"
+    # The signature was rebuilt for the new slot, not reused.
     assert _posted_body(fake, 0)["request_id"] != _posted_body(fake, 1)["request_id"]
+
+
+def test_an_injected_nonce_source_overrides_the_facilitators_view() -> None:
+    """An agent that also sends mech requests of its own owns the counter.
+
+    Neither server can see the other's unsettled slots, so the agent's
+    count is the only one that accounts for both.
+    """
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake, nonce_source=lambda _info: 42)()
+
+    with _patched(fake):
+        response = session.get(f"{_FACILITATOR}/x")
+
+    assert response.status_code == 200
+    # 42 from the agent, not the 7 the facilitator reported.
+    assert _posted_body(fake, 0)["nonce"] == "42"
 
 
 def _collision_response() -> Any:

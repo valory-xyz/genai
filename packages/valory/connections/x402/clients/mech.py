@@ -32,7 +32,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -72,6 +72,22 @@ DEFAULT_TOTAL_DEADLINE_SECS = 300.0
 # off while the facilitator serves it, which is charged. Refuse instead.
 # Must stay below ``total_deadline_secs`` or every call gives up.
 DEFAULT_MIN_CALL_BUDGET_SECS = 30.0
+# Picks the slot to sign the next request at. The default asks the
+# facilitator, which is right while it is the only thing paying from the
+# Safe. An agent that also sends mech requests of its own passes its own
+# counter, because neither server can see the other's unsettled slots.
+NonceSource = Callable[["RequesterInfo"], int]
+
+
+def _facilitator_nonce(info: "RequesterInfo") -> int:
+    """Return the slot the facilitator says is free.
+
+    :param info: the facilitator's requester info.
+    :return: the slot to sign at.
+    """
+    return info.next_nonce
+
+
 # Replayable bodies kept per adapter, and how long one is kept before it
 # is evicted to bound the store.
 _UNRESOLVED_MAX = 32
@@ -300,6 +316,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
         nonce_retry_wait_secs: float = DEFAULT_NONCE_RETRY_WAIT_SECS,
         min_call_budget_secs: float = DEFAULT_MIN_CALL_BUDGET_SECS,
+        nonce_source: Optional[NonceSource] = None,
         default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
         total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
         **kwargs: Any,
@@ -316,6 +333,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param nonce_retry_wait_secs: pause between nonce-collision retries,
             which continue until the call's deadline.
         :param min_call_budget_secs: refuse to sign with less than this left.
+        :param nonce_source: picks the slot to sign at, given the
+            facilitator's info. Defaults to the slot the facilitator
+            reports. Pass the agent's own counter when something else
+            pays from the same Safe.
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
         :param kwargs: passed to ``HTTPAdapter``.
@@ -331,6 +352,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.ttl_secs = ttl_secs
         self.nonce_retry_wait_secs = nonce_retry_wait_secs
         self.min_call_budget_secs = min_call_budget_secs
+        self._nonce_source: NonceSource = nonce_source or _facilitator_nonce
         self._default_timeout = default_timeout
         # Signed POSTs whose outcome is unknown, one entry per upstream call
         # so a second call does not discard the first one's replay.
@@ -615,7 +637,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         if resumed is not None:
             return resumed
         info = self._fetch_info(deadline, **kwargs)
-        nonce = info.next_nonce
+        nonce = self._nonce_source(info)
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_budget: Optional[float] = None
 
@@ -662,19 +684,26 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                     busy_budget -= wait
                     self._wait(deadline, wait)
                     info = self._fetch_info(deadline, **kwargs)
-                    nonce = info.next_nonce
+                    nonce = self._nonce_source(info)
                     continue
             if response.status_code == 409 and error == _NONCE_MISMATCH:
                 # The slot clears when the request ahead settles, so keep
                 # trying until the deadline rather than after a set count.
-                nonce = int(context["expected"])
+                # The slot is re-asked of the source rather than taken
+                # from the response: the facilitator's ``expected`` only
+                # accounts for its own unsettled rows, so when something
+                # else pays from this Safe it points at a slot that
+                # something else is holding.
                 attempt += 1
                 _logger.info(
-                    "mech nonce collision, retrying at slot %s (attempt %s)",
+                    "mech slot %s refused (facilitator expects %s), attempt %s",
                     nonce,
+                    context.get("expected"),
                     attempt,
                 )
                 self._wait(deadline, self.nonce_retry_wait_secs)
+                info = self._fetch_info(deadline, **kwargs)
+                nonce = self._nonce_source(info)
                 continue
             raise MechRequestRejectedError(
                 status_code=response.status_code, error=error, detail=detail
