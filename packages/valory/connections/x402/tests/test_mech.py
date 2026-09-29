@@ -693,10 +693,12 @@ def test_unresolved_signed_body_is_replayed_on_the_next_call_for_the_same_reques
     with _patched(fake):
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        # The facilitator has moved past the slot, so it admitted the POST.
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
     assert _posted_body(fake, 0) == _posted_body(fake, 1)
 
 
@@ -726,7 +728,7 @@ def test_unresolved_body_is_dropped_once_the_facilitator_refuses_it(
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST", "POST"]
     assert _posted_body(fake, 1) == _posted_body(fake, 0)
     assert _posted_body(fake, 2)["nonce"] == str(_INFO_JSON["next_nonce"] + 1)
     assert _posted_body(fake, 2)["request_id"] != _posted_body(fake, 0)["request_id"]
@@ -751,11 +753,12 @@ def test_unresolved_body_still_in_progress_is_reported_not_resigned(
     with _patched(fake):
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
         with pytest.raises(MechRequestRejectedError) as excinfo:
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert excinfo.value.error == "request_in_progress"
-    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST"]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
 
 
 def test_expires_at_follows_the_facilitator_clock() -> None:
@@ -1141,8 +1144,7 @@ def test_a_second_call_does_not_discard_the_first_ones_replay(
 
     A single stored slot let the second call overwrite the first one's
     body, so the first was signed and paid for a second time instead of
-    being asked about. A replay skips the info read, so the call sequence
-    is what tells the two apart.
+    being asked about.
     """
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
@@ -1160,11 +1162,151 @@ def test_a_second_call_does_not_discard_the_first_ones_replay(
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/a", json={"p": 1})
         clock["t"] = 1_000.0  # a fresh call, fresh budget
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
         session.post(f"{_FACILITATOR}/b", json={"p": 2})
         clock["t"] = 1_000.0
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 2}
         replayed = session.post(f"{_FACILITATOR}/a", json={"p": 1})
 
     assert replayed.status_code == 200
-    # A's last POST is a replay: no info read before it. Losing the stored
-    # body would sign afresh, which reads info first.
-    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST", "POST"]
+    # A's stored body is sent as it was signed. Losing it would sign afresh,
+    # which the slot on the wire tells apart.
+    assert [c["method"] for c in fake.calls] == [
+        "GET",
+        "POST",
+        "GET",
+        "POST",
+        "GET",
+        "POST",
+    ]
+    assert _posted_body(fake, 2) == _posted_body(fake, 0)
+
+
+def test_a_replay_that_fails_keeps_the_body_replayable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Losing the body on a failed replay is what makes the next call pay twice."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),  # the original, outcome unknown
+            requests.exceptions.ReadTimeout("slow"),  # the replay, no clearer
+            _response(200, _UPSTREAM_BODY),  # the replay again
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+    moved_on = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
+
+    with _patched(fake):
+        for _ in range(2):
+            with pytest.raises((MechDeadlineExceededError, MechOutcomeUnknownError)):
+                session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+            clock["t"] = 1_000.0
+            fake.info = moved_on
+        replayed = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert replayed.status_code == 200
+    # Every POST is the same signed body, so nothing was paid for twice.
+    posts = [c for c in fake.calls if c["method"] == "POST"]
+    assert len(posts) == 3
+    assert _posted_body(fake, 0) == _posted_body(fake, 1) == _posted_body(fake, 2)
+
+
+def test_a_body_at_a_slot_the_facilitator_never_admitted_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unadmitted body sits on a slot that is still free.
+
+    Sending it again would put it on a slot that may since have gone to
+    something else paying from this Safe, and nothing was served or
+    charged, so there is nothing to ask about.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] = 1_000.0
+        # The counter has not moved, so the slot was never taken. The clock
+        # has, so a fresh signature carries a later expiry than the stored one.
+        fake.info_headers["Date"] = "Wed, 01 Jan 2031 00:00:00 GMT"
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert _posted_body(fake, 1)["expires_at"] != _posted_body(fake, 0)["expires_at"]
+    assert _posted_body(fake, 1)["request_id"] != _posted_body(fake, 0)["request_id"]
+
+
+def test_an_upstream_error_on_a_replay_is_returned_not_paid_for_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The facilitator only passes an upstream answer through once it has served the call."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    upstream_error = _response(400, b'{"error": {"message": "bad prompt"}}')
+    fake = _FakeFacilitator([requests.exceptions.ReadTimeout("slow"), upstream_error])
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] = 1_000.0
+        fake.info = {**_INFO_JSON, "next_nonce": _INFO_JSON["next_nonce"] + 1}
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 400
+    # Two POSTs, not three: the served call was not signed and paid a second time.
+    assert len([c for c in fake.calls if c["method"] == "POST"]) == 2
+
+
+def test_the_deadline_error_names_the_slot_it_waited_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise a slot held elsewhere reads like a slow upstream."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        mech_module.time, "sleep", lambda secs: clock.__setitem__("t", clock["t"] + secs)
+    )
+    fake = _FakeFacilitator([_collision_response()] * 40)
+    session = _session_with(fake, total_deadline_secs=45.0)()
+
+    with _patched(fake), pytest.raises(MechDeadlineExceededError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    message = str(excinfo.value)
+    assert "slot 7" in message
+    assert "expected 8" in message
+    assert "attempts" in message
+
+
+def test_every_retry_signs_at_the_injected_sources_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that pays from this Safe by more than one route owns the count.
+
+    Taking the facilitator's answer on a retry drops back to a slot the
+    agent has already given to something else.
+    """
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+    fake = _FakeFacilitator(
+        [_collision_response(), _busy_response(), _response(200, _UPSTREAM_BODY)]
+    )
+    # Every re-read reports a slot the agent must not drop back to.
+    fake.info_after_post = dict(_INFO_JSON, next_nonce=3)
+    session = _session_with(fake, nonce_source=lambda _info: 42)()
+
+    with _patched(fake):
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert [_posted_body(fake, i)["nonce"] for i in range(3)] == ["42", "42", "42"]
