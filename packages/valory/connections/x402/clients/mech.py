@@ -340,6 +340,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
         :param kwargs: passed to ``HTTPAdapter``.
+        :raises ValueError: when the budget floor is not below the deadline.
         """
         super().__init__(**kwargs)
         self.total_deadline_secs = total_deadline_secs
@@ -351,6 +352,12 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.max_delivery_rate = max_delivery_rate
         self.ttl_secs = ttl_secs
         self.nonce_retry_wait_secs = nonce_retry_wait_secs
+        if min_call_budget_secs >= total_deadline_secs:
+            raise ValueError(
+                f"min_call_budget_secs ({min_call_budget_secs:.0f}s) must be "
+                f"below total_deadline_secs ({total_deadline_secs:.0f}s), or "
+                "every call is refused before it signs anything"
+            )
         self.min_call_budget_secs = min_call_budget_secs
         self._nonce_source: NonceSource = nonce_source or _facilitator_nonce
         self._default_timeout = default_timeout
@@ -400,6 +407,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         is refused before it signs anything.
         """
         remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MechDeadlineExceededError("mech call exceeded its budget")
         if remaining < self.min_call_budget_secs:
             raise MechDeadlineExceededError(
                 f"mech call has {remaining:.1f}s left, below the "
@@ -624,7 +633,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
     def _send_locked(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self, request: requests.PreparedRequest, deadline: float, **kwargs: Any
     ) -> requests.Response:
-        """Run one signed call; the caller holds the per-session lock.
+        """Run one signed call; the caller holds the per-Safe lock.
 
         :param request: the caller's prepared request to the upstream path.
         :param deadline: monotonic instant after which the call gives up.
@@ -650,7 +659,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 headers={"Content-Type": "application/json"},
                 data=json.dumps(body),
             ).prepare()
-            self._check(deadline)
+            # Before every signed POST, not just the first: a retry that
+            # starts with seconds left is served and charged the same way.
+            self._check_budget(deadline)
             # Remembered until a definite outcome: if the deadline or the
             # transport fails after this POST, the next call for the same
             # upstream request replays it instead of paying twice.
@@ -689,11 +700,6 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             if response.status_code == 409 and error == _NONCE_MISMATCH:
                 # The slot clears when the request ahead settles, so keep
                 # trying until the deadline rather than after a set count.
-                # The slot is re-asked of the source rather than taken
-                # from the response: the facilitator's ``expected`` only
-                # accounts for its own unsettled rows, so when something
-                # else pays from this Safe it points at a slot that
-                # something else is holding.
                 attempt += 1
                 _logger.info(
                     "mech slot %s refused (facilitator expects %s), attempt %s",
