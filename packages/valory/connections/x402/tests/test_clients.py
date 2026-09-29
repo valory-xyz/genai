@@ -700,7 +700,7 @@ class TestX402HttpxRetryTimeout:
     def test_consecutive_402s_on_same_client_both_handled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``_is_retry`` is cleared after every cycle so the next 402 is handled.
+        """Two 402s in a row through one client are each paid for.
 
         :param monkeypatch: pytest fixture used to stub the retry client.
         """
@@ -776,7 +776,6 @@ class TestX402HttpxRetryTimeout:
         asyncio.run(_run())
 
         assert len(header_calls) == 2
-        assert hooks._is_retry is False
 
 
 class TestX402RetryFlagIsNotLeaked:
@@ -837,3 +836,106 @@ class TestX402RetryFlagIsNotLeaked:
         assert second.status_code == 200
         # Each call: one unpaid probe that gets the challenge, one paid retry.
         assert [h is None for h in paid_headers] == [True, False, True, False]
+
+
+class TestX402HttpxConcurrentCallsEachPay:
+    """One hooks object serves every call on the client, so it holds no per-call state."""
+
+    @staticmethod
+    def _challenge() -> Any:
+        from packages.valory.connections.x402.types import (
+            PaymentRequirements,
+            x402PaymentRequiredResponse,
+        )
+
+        body = x402PaymentRequiredResponse(
+            x402_version=1,
+            accepts=[
+                PaymentRequirements(
+                    scheme="exact",
+                    network="base",
+                    max_amount_required="1",
+                    resource="http://example.com/",
+                    description="t",
+                    mime_type="application/json",
+                    pay_to="0x0000000000000000000000000000000000000000",
+                    max_timeout_seconds=60,
+                    asset="0x0000000000000000000000000000000000000000",
+                )
+            ],
+            error="",
+        )
+        response = MagicMock(spec=httpx.Response)
+        response.status_code = 402
+        response.request = MagicMock(spec=httpx.Request)
+        response.request.headers = {}
+        response.aread = AsyncMock(return_value=None)
+        response.json.return_value = body.model_dump(by_alias=True)
+        response.headers = {}
+        response._content = b""
+        return response
+
+    def test_a_402_arriving_during_another_calls_retry_is_still_paid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Otherwise the second call hands its 402 straight back to the caller.
+
+        The paid retry goes out on a client with no hooks, so nothing it
+        returns can re-enter here and there is no recursion to guard
+        against. A guard on the hooks would be shared by every concurrent
+        call through this client rather than scoped to one.
+        """
+        hooks = HttpxHooks(MagicMock(), retry_timeout=(2.5, 7.5))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        paid: list = []
+
+        class _StubAsyncClient:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            async def __aenter__(self) -> "_StubAsyncClient":
+                return self
+
+            async def __aexit__(self, *_a: Any) -> None:
+                return None
+
+            async def send(self, request: object) -> object:
+                paid.append(request.headers.get("X-Payment"))
+                # Hold the first retry open so the second 402 arrives while
+                # it is still in flight, which is the race being pinned.
+                if len(paid) == 1:
+                    started.set()
+                    await release.wait()
+                ok = MagicMock(spec=httpx.Response)
+                ok.status_code = 200
+                ok.headers = {}
+                ok._content = b"ok"
+                return ok
+
+        monkeypatch.setattr(
+            "packages.valory.connections.x402.clients.httpx.AsyncClient",
+            _StubAsyncClient,
+        )
+        hooks.client.select_payment_requirements = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda accepts: accepts[0]
+        )
+        hooks.client.create_payment_header = MagicMock(  # type: ignore[method-assign]
+            return_value="payment-header"
+        )
+
+        async def _run() -> None:
+            first = asyncio.create_task(hooks.on_response(self._challenge()))
+            await started.wait()
+            second = self._challenge()
+            in_flight = asyncio.create_task(hooks.on_response(second))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(first, in_flight)
+            assert second.status_code == 200
+
+        asyncio.run(_run())
+
+        # Both calls attached a payment header, rather than one coming back
+        # as the unpaid 402 the gateway sent.
+        assert paid == ["payment-header", "payment-header"]
