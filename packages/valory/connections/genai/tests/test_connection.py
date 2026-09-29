@@ -159,13 +159,9 @@ class TestProcessX402RequestPaymentResponseHeader:
             ),
             _eoa_account=MagicMock(),  # the session factories are monkeypatched away
             _mech_session=None,
-            _mech_nonce_floor=None,
         )
         for key, value in overrides.items():
             setattr(stub, key, value)
-        stub._mech_nonce_source = lambda info: GenaiConnection._mech_nonce_source(
-            cast(GenaiConnection, stub), info
-        )
         # Resolve the session the same way the real connection does.
         stub._paid_session_and_base_url = (
             lambda: GenaiConnection._paid_session_and_base_url(
@@ -713,50 +709,3 @@ class TestMechFacilitatorPath:
             "available": 2000,
             "required": 10000,
         }
-
-
-class TestMechNonceFloor:
-    """The facilitator cannot see slots the agent holds, so the agent says so."""
-
-    @staticmethod
-    def _connection(floor: Any = None) -> Any:
-        from packages.valory.connections.genai.connection import GenaiConnection
-
-        conn = GenaiConnection.__new__(GenaiConnection)
-        conn._mech_nonce_floor = floor
-        return conn
-
-    @pytest.mark.parametrize(
-        "floor, next_nonce, expected",
-        [
-            pytest.param(None, 7, 7, id="no floor leaves the facilitator's answer"),
-            pytest.param(9, 7, 9, id="a higher floor wins"),
-            pytest.param(5, 7, 7, id="a lower floor never pulls the slot back"),
-            pytest.param(7, 7, 7, id="an equal floor is the same slot"),
-        ],
-    )
-    def test_the_floor_only_ever_raises_the_slot(
-        self, floor: Any, next_nonce: int, expected: int
-    ) -> None:
-        """Pulling a slot back would land on one the facilitator already holds."""
-        conn = self._connection(floor)
-        info = SimpleNamespace(next_nonce=next_nonce)
-
-        assert conn._mech_nonce_source(info) == expected
-
-    @pytest.mark.parametrize(
-        "payload, expected",
-        [
-            pytest.param({"mech_nonce_floor": 12}, 12, id="an integer"),
-            pytest.param({"mech_nonce_floor": "12"}, 12, id="a numeric string"),
-            pytest.param({}, None, id="absent"),
-            pytest.param({"mech_nonce_floor": None}, None, id="null"),
-            pytest.param({"mech_nonce_floor": "abc"}, None, id="not a number"),
-            pytest.param({"mech_nonce_floor": -1}, None, id="negative"),
-        ],
-    )
-    def test_a_bad_floor_is_dropped_rather_than_raised_on(
-        self, payload: dict, expected: Any
-    ) -> None:
-        """The call is still payable at the facilitator's slot, so do not kill the agent."""
-        assert genai_connection.read_nonce_floor(payload) == expected

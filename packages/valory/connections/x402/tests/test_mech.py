@@ -46,7 +46,10 @@ from packages.valory.connections.x402.clients.mech import (
     MechRateExceededError,
     MechRequestRejectedError,
     RequesterInfo,
+    live_slots,
     mech_requests,
+    release_slot,
+    reserve_slot,
 )
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
@@ -248,6 +251,18 @@ def _session_with(
     return _make
 
 
+@pytest.fixture(autouse=True)
+def _empty_slot_registry() -> Any:
+    """Start every test with no slots held for any Safe.
+
+    The registry is process-wide by design, so without this one test's
+    slot becomes the next test's floor.
+    """
+    live_slots().clear()
+    yield
+    live_slots().clear()
+
+
 def _patched_send(side_effect: Any):
     """Patch ``HTTPAdapter.send`` with an arbitrary stand-in."""
     return patch.object(
@@ -385,21 +400,99 @@ def test_a_refused_slot_is_re_asked_of_the_source_not_taken_from_the_response() 
     assert _posted_body(fake, 0)["request_id"] != _posted_body(fake, 1)["request_id"]
 
 
-def test_an_injected_nonce_source_overrides_the_facilitators_view() -> None:
-    """An agent that also sends mech requests of its own owns the counter.
+def test_a_slot_held_elsewhere_in_the_process_is_stepped_over() -> None:
+    """The facilitator's answer is a floor, not the whole picture.
 
-    Neither server can see the other's unsettled slots, so the agent's
-    count is the only one that accounts for both.
+    It accounts for its own unsettled rows and nothing else. A mech
+    request signed by a skill in the same agent is invisible to it, so
+    signing at its answer would put two requests on one slot.
     """
     fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
-    session = _session_with(fake, nonce_source=lambda _info: 42)()
+    # Something else in this process is already holding the slot the
+    # facilitator is about to report.
+    held = reserve_slot(_CHAIN, _SAFE, _INFO_JSON["next_nonce"])
+    session = _session_with(fake)()
 
     with _patched(fake):
         response = session.get(f"{_FACILITATOR}/x")
 
     assert response.status_code == 200
-    # 42 from the agent, not the 7 the facilitator reported.
-    assert _posted_body(fake, 0)["nonce"] == "42"
+    assert held == _INFO_JSON["next_nonce"]
+    assert _posted_body(fake, 0)["nonce"] == str(held + 1)
+
+
+def test_a_served_slot_stays_held_until_the_floor_moves_past_it() -> None:
+    """Handing back a slot the facilitator is serving would re-issue it."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        session.get(f"{_FACILITATOR}/x")
+
+    key = (_CHAIN.lower(), _SAFE.lower())
+    assert live_slots()[key] == {_INFO_JSON["next_nonce"]}
+    # Settlement moves the on-chain counter, and with it the facilitator's
+    # answer; the slot is gone for good and is pruned on the next reserve.
+    assert reserve_slot(_CHAIN, _SAFE, _INFO_JSON["next_nonce"] + 1) == (
+        _INFO_JSON["next_nonce"] + 1
+    )
+    assert live_slots()[key] == {_INFO_JSON["next_nonce"] + 1}
+
+
+def test_a_refused_slot_is_handed_straight_back() -> None:
+    """The marketplace consumes a requester's slots in order.
+
+    A slot kept after a refusal is one nothing will ever settle, and
+    every later request for the Safe queues behind it forever.
+    """
+    refusal = _json_response(
+        402,
+        {
+            "detail": {
+                "error": "insufficient_deposit",
+                "detail": "top up",
+                "context": {
+                    "balance": 1,
+                    "reserved": 0,
+                    "available": 1,
+                    "required": 10,
+                },
+            }
+        },
+    )
+    fake = _FakeFacilitator([refusal])
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        with pytest.raises(MechDepositRequiredError):
+            session.get(f"{_FACILITATOR}/x")
+
+    assert live_slots() == {}
+
+
+def test_two_safes_do_not_share_a_slot_count() -> None:
+    """The marketplace counts slots per requester, not per process."""
+    other_safe = to_checksum_address("0x" + "ab" * 20)
+
+    assert reserve_slot(_CHAIN, _SAFE, 5) == 5
+    assert reserve_slot(_CHAIN, other_safe, 5) == 5
+    assert reserve_slot(_CHAIN, _SAFE, 5) == 6
+
+    release_slot(_CHAIN, _SAFE, 5)
+    release_slot(_CHAIN, _SAFE, 6)
+    assert (_CHAIN.lower(), _SAFE.lower()) not in live_slots()
+    assert live_slots()[(_CHAIN.lower(), other_safe.lower())] == {5}
+
+
+def test_a_gap_left_by_a_release_is_filled_before_a_higher_slot() -> None:
+    """Skipping a freed slot would stall the Safe until something steps over it."""
+    assert reserve_slot(_CHAIN, _SAFE, 3) == 3
+    assert reserve_slot(_CHAIN, _SAFE, 3) == 4
+    assert reserve_slot(_CHAIN, _SAFE, 3) == 5
+
+    release_slot(_CHAIN, _SAFE, 4)
+
+    assert reserve_slot(_CHAIN, _SAFE, 3) == 4
 
 
 def _collision_response() -> Any:
