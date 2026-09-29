@@ -55,6 +55,11 @@ DEFAULT_REQUEST_TTL_SECS = 120
 # settlement tick away, so the retry is bounded by the call's deadline
 # rather than by a count.
 DEFAULT_NONCE_RETRY_WAIT_SECS = 2.0
+# A refused slot clears when whatever holds the slot below it settles, and
+# the whole of that wait is spent holding this Safe's lock. Waiting out the
+# call's full deadline blocks every other route paying from the same Safe,
+# so the retries get a shorter budget of their own and the call gives up.
+DEFAULT_NONCE_RETRY_BUDGET_SECS = 60.0
 # The facilitator may hold one POST for its admission wait (25s) plus RPC
 # reads plus its upstream deadline (120s); an abandoned call is still charged.
 FACILITATOR_WORST_CASE_SECS = 25.0 + 120.0
@@ -256,6 +261,15 @@ class MechDeadlineExceededError(PaymentError):
     """The call's total wall-clock budget ran out across its waits and retries."""
 
 
+class MechSlotHeldElsewhereError(MechDeadlineExceededError):
+    """A slot below this call's stayed unsettled for the whole retry budget.
+
+    Nothing was served or charged. Raised rather than waiting out the
+    call's full deadline, because the wait holds this Safe's lock and
+    every other route paying from it queues behind.
+    """
+
+
 class MechOutcomeUnknownError(PaymentError):
     """A signed request was sent and the replay that asks for its outcome failed too.
 
@@ -401,6 +415,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         max_delivery_rate: Optional[int] = None,
         ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
         nonce_retry_wait_secs: float = DEFAULT_NONCE_RETRY_WAIT_SECS,
+        nonce_retry_budget_secs: float = DEFAULT_NONCE_RETRY_BUDGET_SECS,
         min_call_budget_secs: float = DEFAULT_MIN_CALL_BUDGET_SECS,
         default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
         total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
@@ -415,6 +430,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param facilitator_base_url: origin of the facilitator, no path.
         :param max_delivery_rate: refuse to sign a rate above this (base units).
         :param ttl_secs: how long a signed request stays valid.
+        :param nonce_retry_budget_secs: total time spent retrying a refused
+            slot before giving up, so the per-Safe lock is not held for the
+            whole deadline.
         :param nonce_retry_wait_secs: pause between nonce-collision retries,
             which continue until the call's deadline.
         :param min_call_budget_secs: refuse to sign with less than this left.
@@ -433,6 +451,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.max_delivery_rate = max_delivery_rate
         self.ttl_secs = ttl_secs
         self.nonce_retry_wait_secs = nonce_retry_wait_secs
+        self.nonce_retry_budget_secs = nonce_retry_budget_secs
         if min_call_budget_secs >= total_deadline_secs:
             raise ValueError(
                 f"min_call_budget_secs ({min_call_budget_secs:.0f}s) must be "
@@ -795,6 +814,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
 
         attempt = 0
         refused: Optional[Tuple[int, Any, int]] = None
+        nonce_deadline: Optional[float] = None
         try:
             while True:
                 body = self._signed_body(call, info, nonce)
@@ -854,6 +874,18 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                         "mech slot %s refused (facilitator expects %s), attempt %s",
                         *refused,
                     )
+                    if nonce_deadline is None:
+                        nonce_deadline = min(
+                            deadline,
+                            time.monotonic() + self.nonce_retry_budget_secs,
+                        )
+                    if time.monotonic() + self.nonce_retry_wait_secs > nonce_deadline:
+                        slot, expected, attempts = refused
+                        raise MechSlotHeldElsewhereError(
+                            f"mech slot {slot} was still refused after {attempts} "
+                            f"attempts over {self.nonce_retry_budget_secs:.0f}s; "
+                            f"the facilitator expected {expected}"
+                        )
                     self._wait(deadline, self.nonce_retry_wait_secs)
                     info = self._fetch_info(deadline, **kwargs)
                     self._release(nonce)
@@ -862,6 +894,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 raise MechRequestRejectedError(
                     status_code=response.status_code, error=error, detail=detail
                 )
+        except MechSlotHeldElsewhereError:
+            raise
         except MechDeadlineExceededError as exc:
             if refused is None:
                 raise

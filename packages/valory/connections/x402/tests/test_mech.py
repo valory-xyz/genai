@@ -45,6 +45,7 @@ from packages.valory.connections.x402.clients.mech import (
     MechOutcomeUnknownError,
     MechRateExceededError,
     MechRequestRejectedError,
+    MechSlotHeldElsewhereError,
     RequesterInfo,
     slot_registry,
     mech_requests,
@@ -1437,3 +1438,46 @@ def test_a_dropped_unadmitted_body_hands_its_slot_back(
     assert response.status_code == 200
     # The fresh signature takes the slot back rather than stepping over it.
     assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
+
+
+def test_a_slot_that_never_clears_gives_up_before_the_call_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait holds this Safe's lock, so every other route queues behind it.
+
+    Waiting out the call's full deadline turns one blocked chat call into
+    a blocked CoinGecko call as well.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        mech_module.time, "sleep", lambda secs: clock.__setitem__("t", clock["t"] + secs)
+    )
+    fake = _FakeFacilitator([_collision_response()] * 200)
+    session = _session_with(
+        fake, total_deadline_secs=600.0, nonce_retry_budget_secs=20.0
+    )()
+
+    with _patched(fake), pytest.raises(MechSlotHeldElsewhereError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    # Gave up on its own budget, with the call's deadline still far off.
+    assert clock["t"] - 1_000.0 < 30.0
+    assert "slot 7" in str(excinfo.value)
+    assert "expected 8" in str(excinfo.value)
+
+
+def test_a_slot_that_never_clears_still_leaves_the_safe_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot given up on must not stay reserved, or it stalls the Safe."""
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+    fake = _FakeFacilitator([_collision_response()] * 200)
+    session = _session_with(
+        fake, total_deadline_secs=600.0, nonce_retry_budget_secs=0.0
+    )()
+
+    with _patched(fake), pytest.raises(MechSlotHeldElsewhereError):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert slot_registry().live == {}
