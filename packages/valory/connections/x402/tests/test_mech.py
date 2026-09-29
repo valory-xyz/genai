@@ -46,7 +46,7 @@ from packages.valory.connections.x402.clients.mech import (
     MechRateExceededError,
     MechRequestRejectedError,
     RequesterInfo,
-    live_slots,
+    slot_registry,
     mech_requests,
     release_slot,
     reserve_slot,
@@ -258,9 +258,9 @@ def _empty_slot_registry() -> Any:
     The registry is process-wide by design, so without this one test's
     slot becomes the next test's floor.
     """
-    live_slots().clear()
+    slot_registry().live.clear()
     yield
-    live_slots().clear()
+    slot_registry().live.clear()
 
 
 def _patched_send(side_effect: Any):
@@ -430,13 +430,13 @@ def test_a_served_slot_stays_held_until_the_floor_moves_past_it() -> None:
         session.get(f"{_FACILITATOR}/x")
 
     key = (_CHAIN.lower(), _SAFE.lower())
-    assert live_slots()[key] == {_INFO_JSON["next_nonce"]}
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"]}
     # Settlement moves the on-chain counter, and with it the facilitator's
     # answer; the slot is gone for good and is pruned on the next reserve.
     assert reserve_slot(_CHAIN, _SAFE, _INFO_JSON["next_nonce"] + 1) == (
         _INFO_JSON["next_nonce"] + 1
     )
-    assert live_slots()[key] == {_INFO_JSON["next_nonce"] + 1}
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"] + 1}
 
 
 def test_a_refused_slot_is_handed_straight_back() -> None:
@@ -467,7 +467,7 @@ def test_a_refused_slot_is_handed_straight_back() -> None:
         with pytest.raises(MechDepositRequiredError):
             session.get(f"{_FACILITATOR}/x")
 
-    assert live_slots() == {}
+    assert slot_registry().live == {}
 
 
 def test_two_safes_do_not_share_a_slot_count() -> None:
@@ -480,8 +480,8 @@ def test_two_safes_do_not_share_a_slot_count() -> None:
 
     release_slot(_CHAIN, _SAFE, 5)
     release_slot(_CHAIN, _SAFE, 6)
-    assert (_CHAIN.lower(), _SAFE.lower()) not in live_slots()
-    assert live_slots()[(_CHAIN.lower(), other_safe.lower())] == {5}
+    assert (_CHAIN.lower(), _SAFE.lower()) not in slot_registry().live
+    assert slot_registry().live[(_CHAIN.lower(), other_safe.lower())] == {5}
 
 
 def test_a_gap_left_by_a_release_is_filled_before_a_higher_slot() -> None:

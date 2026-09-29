@@ -99,71 +99,106 @@ def _safe_lock(chain: str, safe_address: str) -> threading.Lock:
         return lock
 
 
-# Marketplace slots handed out for a Safe and not yet finished with, for
-# the whole process. ``mapNonces`` only moves when a delivery settles, so
-# a slot that is taken but unsettled is invisible to anyone reading the
-# chain, and to any server that is not the one holding it. An agent can
-# have more than one thing paying from one Safe, and each of them tracks
-# only its own, so this is the one place that sees all of them.
-#
-# Exposed as a module attribute on purpose: a skill that signs marketplace
-# requests without going through this adapter shares it by binding this
-# same object into the agent's shared state. It must stay the same object,
-# so rebind it rather than replacing it.
-_LIVE_SLOTS: Dict[Tuple[str, str], Set[int]] = {}
-_LIVE_SLOTS_GUARD = threading.Lock()
+class SlotRegistry:
+    """Marketplace slots in use for a Safe, for one process.
 
+    ``mapNonces`` only moves when a delivery settles, so a slot that is
+    taken but unsettled is invisible to anyone reading the chain, and to
+    any server that is not the one holding it. An agent can have more than
+    one thing paying from a single Safe, and each of them tracks only its
+    own, so one of these is the only complete view.
 
-def live_slots() -> Dict[Tuple[str, str], Set[int]]:
-    """Return the process-wide live slot registry.
-
-    :return: slots in use per ``(chain, Safe)``, both lower case.
+    Kept as a live object rather than exchanged as a value: a skill that
+    signs marketplace requests without going through this adapter shares
+    it by binding the same instance into the agent's shared state.
     """
-    return _LIVE_SLOTS
+
+    def __init__(self) -> None:
+        """Start with no slots held for any Safe."""
+        self._live: Dict[Tuple[str, str], Set[int]] = {}
+        self._guard = threading.Lock()
+
+    @property
+    def live(self) -> Dict[Tuple[str, str], Set[int]]:
+        """Return the slots in use per ``(chain, Safe)``, both lower case.
+
+        :return: the registry contents, for inspection and for tests.
+        """
+        return self._live
+
+    def reserve(self, chain: str, safe_address: str, floor: int) -> int:
+        """Take the lowest free slot at or above ``floor``.
+
+        :param chain: facilitator chain slug.
+        :param safe_address: the Safe that pays for the call.
+        :param floor: lowest slot that may be used, from whichever server
+            was asked. Everything below it has settled and is gone for good.
+        :return: the slot to sign at, now reserved.
+
+        Slots below ``floor`` are dropped on the way in, since keeping
+        settled ones would leave the set growing forever.
+        """
+        key = (chain.lower(), safe_address.lower())
+        with self._guard:
+            live = self._live.setdefault(key, set())
+            live.difference_update([slot for slot in live if slot < floor])
+            slot = floor
+            while slot in live:
+                slot += 1
+            live.add(slot)
+            return slot
+
+    def release(self, chain: str, safe_address: str, slot: int) -> None:
+        """Give back a slot whose request was refused before it was served.
+
+        :param chain: facilitator chain slug.
+        :param safe_address: the Safe that pays for the call.
+        :param slot: the slot reserved earlier.
+
+        The marketplace consumes a requester's slots in order, so a slot
+        kept after a refusal is one nothing will ever settle, and every
+        later request for the Safe queues behind it forever.
+        """
+        key = (chain.lower(), safe_address.lower())
+        with self._guard:
+            live = self._live.get(key)
+            if live is None:
+                return
+            live.discard(slot)
+            if not live:
+                del self._live[key]
+
+
+_SLOTS = SlotRegistry()
+
+
+def slot_registry() -> SlotRegistry:
+    """Return the process-wide slot registry.
+
+    :return: the registry every payer in this process shares.
+    """
+    return _SLOTS
 
 
 def reserve_slot(chain: str, safe_address: str, floor: int) -> int:
-    """Take the lowest free marketplace slot at or above ``floor``.
+    """Take the lowest free slot at or above ``floor``; see ``SlotRegistry``.
 
     :param chain: facilitator chain slug.
     :param safe_address: the Safe that pays for the call.
-    :param floor: lowest slot that may be used, from whichever server was
-        asked. Everything below it has settled and can never be used again.
+    :param floor: lowest slot that may be used.
     :return: the slot to sign at, now reserved.
-
-    Slots below ``floor`` are dropped on the way in, since a settled slot
-    is gone for good and keeping it would leave the set growing forever.
     """
-    key = (chain.lower(), safe_address.lower())
-    with _LIVE_SLOTS_GUARD:
-        live = _LIVE_SLOTS.setdefault(key, set())
-        live.difference_update([slot for slot in live if slot < floor])
-        slot = floor
-        while slot in live:
-            slot += 1
-        live.add(slot)
-        return slot
+    return _SLOTS.reserve(chain, safe_address, floor)
 
 
 def release_slot(chain: str, safe_address: str, slot: int) -> None:
-    """Give back a slot whose request was refused before it was served.
+    """Hand a refused slot back; see ``SlotRegistry``.
 
     :param chain: facilitator chain slug.
     :param safe_address: the Safe that pays for the call.
     :param slot: the slot reserved earlier.
-
-    Holding a slot nothing will ever settle stalls every later request for
-    the Safe, because the marketplace consumes a requester's slots in
-    order. So a refusal has to hand it straight back.
     """
-    key = (chain.lower(), safe_address.lower())
-    with _LIVE_SLOTS_GUARD:
-        live = _LIVE_SLOTS.get(key)
-        if live is None:
-            return
-        live.discard(slot)
-        if not live:
-            del _LIVE_SLOTS[key]
+    _SLOTS.release(chain, safe_address, slot)
 
 
 _NONCE_MISMATCH = "nonce_mismatch"
