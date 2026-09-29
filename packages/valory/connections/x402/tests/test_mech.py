@@ -440,16 +440,40 @@ def test_nonce_collisions_retry_until_the_deadline_not_a_fixed_count(
     assert clock["t"] == 20.0  # the last wait lands on the deadline
 
 
-def test_a_call_with_too_little_budget_left_is_refused_before_it_signs() -> None:
-    """The facilitator charges for a call it served, even if the client walked away."""
-    fake = _FakeFacilitator([])
-    session = _session_with(fake, total_deadline_secs=5.0, min_call_budget_secs=30.0)()
+def test_a_retry_with_too_little_budget_left_is_not_signed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late retry is served and charged exactly like a first attempt.
+
+    The retries run until the deadline, so without a check at every
+    signing point the last one posts with seconds left, gets cut off
+    while the facilitator serves it, and is charged anyway.
+    """
+    busy = _busy_response()
+    busy.headers["Retry-After"] = "60"
+    fake = _FakeFacilitator([busy] * 10)
+    session = _session_with(
+        fake, total_deadline_secs=200.0, min_call_budget_secs=50.0
+    )()
+    clock = _fake_clock(monkeypatch)
 
     with _patched(fake), pytest.raises(MechDeadlineExceededError) as excinfo:
-        session.get(f"{_FACILITATOR}/x")
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
-    assert "below the 30s needed" in str(excinfo.value)
-    assert fake.calls == []  # nothing signed, nothing posted, nothing charged
+    assert "below the 50s needed" in str(excinfo.value)
+    posts = [c for c in fake.calls if c["method"] == "POST"]
+    # Posted at 0s, 60s and 120s. At 180s only 20s is left, so it stops
+    # rather than signing a fourth one it cannot see through.
+    assert len(posts) == 3
+    assert clock["t"] == 180.0
+
+
+def test_a_budget_floor_at_or_above_the_deadline_is_refused_at_construction() -> None:
+    """Otherwise every call is refused before it signs, which looks like an outage."""
+    fake = _FakeFacilitator([])
+
+    with pytest.raises(ValueError, match="must be below total_deadline_secs"):
+        _session_with(fake, total_deadline_secs=30.0, min_call_budget_secs=30.0)()
 
 
 def test_402_raises_a_typed_deposit_error_with_the_shortfall() -> None:
@@ -937,7 +961,9 @@ def test_call_gives_up_once_its_total_budget_is_spent(
     busy = _busy_response()
     busy.headers["Retry-After"] = "120"
     fake = _FakeFacilitator([busy] * 10)
-    session = _session_with(fake, total_deadline_secs=250.0)()
+    session = _session_with(
+        fake, total_deadline_secs=250.0, min_call_budget_secs=0.0
+    )()
     clock = _fake_clock(monkeypatch)
 
     with _patched(fake), pytest.raises(MechDeadlineExceededError):
@@ -1056,7 +1082,7 @@ def test_two_threads_on_one_session_take_turns() -> None:
 def test_waiting_for_the_session_past_the_deadline_gives_up() -> None:
     """A thread that cannot get its turn in time fails instead of stalling the caller."""
     fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
-    session = _session_with(fake, total_deadline_secs=0.3)()
+    session = _session_with(fake, total_deadline_secs=0.3, min_call_budget_secs=0.0)()
     adapter = session.get_adapter(_FACILITATOR)
     adapter._lock.acquire()  # stand in for another thread mid-call
     try:
