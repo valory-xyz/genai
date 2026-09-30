@@ -598,20 +598,20 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param kwargs: adapter send arguments.
         :return: the stored response, or ``None`` when a fresh request must be signed.
 
-        A body is only worth replaying once the facilitator has moved past
-        the slot it was signed at, which is the only sign it was admitted.
-        Below that the slot is still free, so nothing was served or charged,
-        and the body is dropped rather than sent at a slot that may since
-        have been handed to something else paying from this Safe.
+        Replayed while the facilitator's first free slot is still at or
+        above the one the body carries. At it, the body may be queued for
+        admission, and signing afresh would have the original admitted
+        behind the retry and pay for both. Above it the slot is spent, so
+        the body can never be admitted there and a fresh one is signed.
         """
         pending = self._take_unresolved(call_key)
         if pending is None:
             return None
         prepared, nonce = pending
-        if nonce >= int(info.next_nonce):
+        if nonce > int(info.next_nonce):
             _logger.info(
                 "mech call has an unresolved request at slot %s, which the "
-                "facilitator never admitted; signing afresh",
+                "facilitator has moved past; signing afresh",
                 nonce,
             )
             return None

@@ -25,6 +25,7 @@ import base64
 import json
 import threading
 import time
+from email.utils import formatdate
 from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import patch
 
@@ -1214,14 +1215,14 @@ def test_a_replay_that_fails_keeps_the_body_replayable(
     assert _posted_body(fake, 0) == _posted_body(fake, 1) == _posted_body(fake, 2)
 
 
-def test_a_body_at_a_slot_the_facilitator_never_admitted_is_not_replayed(
+def test_a_body_still_awaiting_admission_is_replayed_not_re_signed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unadmitted body sits on a slot that is still free.
+    """The counter sits at the stored slot both before and during admission.
 
-    Sending it again would put it on a slot that may since have gone to
-    something else paying from this Safe, and nothing was served or
-    charged, so there is nothing to ask about.
+    A body queued for admission when the client walked away has not moved
+    the counter yet. Signing afresh creates a second request for the same
+    slot, and the original is still admitted, so the Safe pays twice.
     """
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
@@ -1235,14 +1236,50 @@ def test_a_body_at_a_slot_the_facilitator_never_admitted_is_not_replayed(
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
         clock["t"] = 1_000.0
-        # The counter has not moved, so the slot was never taken. The clock
-        # has, so a fresh signature carries a later expiry than the stored one.
-        fake.info_headers["Date"] = "Wed, 01 Jan 2031 00:00:00 GMT"
+        # A few seconds on the facilitator's clock, well inside the request
+        # TTL. A fresh signature would carry the later expiry; a replay cannot.
+        fake.info_headers["Date"] = formatdate(time.time() + 5, usegmt=True)
+        first = _posted_body(fake, 0)
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    assert _posted_body(fake, 1)["expires_at"] != _posted_body(fake, 0)["expires_at"]
-    assert _posted_body(fake, 1)["request_id"] != _posted_body(fake, 0)["request_id"]
+    assert _posted_body(fake, 1) == first
+    assert _posted_body(fake, 1)["expires_at"] == first["expires_at"]
+
+
+def test_a_body_above_the_facilitators_next_slot_is_dropped_and_signed_afresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the stored slot the body can never be admitted there.
+
+    Replaying it would only be refused, so a fresh signature at the slot
+    the facilitator is actually expecting is the only thing that can land.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    above = _INFO_JSON["next_nonce"] + 1
+    # An agent that pays from this Safe by another route signs above the
+    # facilitator's own slot; that is how a stored body ends up there.
+    sources = iter([above, _INFO_JSON["next_nonce"]])
+    session = _session_with(fake, account=Account.create(),
+                            nonce_source=lambda _info: next(sources))()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] = 1_000.0
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    posts = [c for c in fake.calls if c["method"] == "POST"]
+    assert len(posts) == 2
+    assert _posted_body(fake, 0)["nonce"] == str(above)
+    # Dropped, not replayed: signed afresh at the slot the facilitator wants.
+    assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
 
 
 def test_an_upstream_error_on_a_replay_is_returned_not_paid_for_again(
