@@ -678,6 +678,40 @@ class TestTheFacilitatorOwnsTheSlotsItReports:
         assert response.status_code == 200
         assert _posted_body(fake, 1)["nonce"] == "7", "stepped over a dead slot"
 
+    def test_an_idle_adapter_no_longer_pins_the_slot(self) -> None:
+        """Nothing here may make a facilitator call again for days.
+
+        Retirement on a requester-info read only happens when something
+        pays. A slot stranded by an adapter that then goes quiet would keep
+        the mech skill's on-chain path waiting the whole time, so anything
+        with a clock can retire one.
+        """
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        freed = registry.retire_expired(_CHAIN, _SAFE, now=1_001)
+
+        assert freed == [7]
+        assert registry.live == {}
+
+    def test_retiring_leaves_the_facilitators_own_rows_alone(self) -> None:
+        """It admitted the request, so its next report is what retires it."""
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [7], now=1_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=10**9) == []
+        assert registry.live[self._KEY] == {7}
+
+    def test_retiring_keeps_a_request_that_can_still_be_admitted(self) -> None:
+        """Freeing it early is the collision the registry exists to stop."""
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 2_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=1_999) == []
+        assert registry.live[self._KEY] == {7}
+
     def test_a_facilitator_that_reports_only_a_count_keeps_the_old_behaviour(
         self,
     ) -> None:

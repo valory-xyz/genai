@@ -32,7 +32,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -210,26 +210,55 @@ class SlotRegistry:
                 self._published[key] = held
             else:
                 self._published.pop(key, None)
-            for slot in list(self._reserved.get(key, set())):
-                expires_at = self._expiry.get((key, slot))
-                if slot in held or (
-                    expires_at is not None and expires_at > moment
-                ):
-                    # Its row now, or still admissible and so still ours.
-                    if slot in held:
-                        self._forget(key, slot)
-                    continue
-                if expires_at is None:
-                    # Signed body not recorded yet; the call that took it is
-                    # still inside its own attempt and will hand it back.
-                    continue
-                _logger.info(
-                    "mech slot %s expired at %s and the facilitator does not "
-                    "report holding it; handing the slot back",
-                    slot,
-                    expires_at,
-                )
+            for slot in held & self._reserved.get(key, set()):
+                # Its row now rather than ours.
                 self._forget(key, slot)
+            self._retire_expired_locked(key, moment)
+
+    def _retire_expired_locked(self, key: Tuple[str, str], moment: int) -> List[int]:
+        """Free reserved slots past their expiry; caller holds the guard.
+
+        :param key: chain and Safe, both lower case.
+        :param moment: the clock to judge expiry against.
+        :return: the slots freed.
+
+        Never touches what the facilitator reports. An expired request it
+        already admitted is its row, and only its next report retires that.
+        """
+        freed = []
+        for slot in list(self._reserved.get(key, set())):
+            expires_at = self._expiry.get((key, slot))
+            if expires_at is None or expires_at > moment:
+                # No signed body yet, so the call that took it is still
+                # inside its own attempt; or still admissible, so still ours.
+                continue
+            _logger.info(
+                "mech slot %s expired at %s and no facilitator reports "
+                "holding it; handing the slot back",
+                slot,
+                expires_at,
+            )
+            self._forget(key, slot)
+            freed.append(slot)
+        return freed
+
+    def retire_expired(
+        self, chain: str, safe_address: str, now: int
+    ) -> List[int]:
+        """Free slots whose signed request can no longer be admitted.
+
+        :param chain: facilitator chain slug.
+        :param safe_address: the Safe that pays for the call.
+        :param now: the clock to judge expiry against.
+        :return: the slots freed.
+
+        For a caller with no facilitator of its own to ask. Slots the
+        facilitator reports are left alone, so this is safe to run from
+        anything in the process that can see a clock.
+        """
+        key = (chain.lower(), safe_address.lower())
+        with self._guard:
+            return self._retire_expired_locked(key, int(now))
 
     def hand_over(self, chain: str, safe_address: str, slot: int) -> None:
         """Record that the facilitator has taken responsibility for ``slot``.
