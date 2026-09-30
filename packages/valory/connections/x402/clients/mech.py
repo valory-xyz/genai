@@ -743,11 +743,13 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param kwargs: adapter send arguments.
         :return: the stored response, or ``None`` when a fresh request must be signed.
 
-        Replayed while the facilitator's first free slot is still at or
-        above the one the body carries. At it, the body may be queued for
-        admission, and signing afresh would have the original admitted
-        behind the retry and pay for both. Above it the slot is spent, so
-        the body can never be admitted there and a fresh one is signed.
+        Replayed unless the body's slot is above the facilitator's first
+        free slot. At it the body may still be queued for admission, and
+        signing afresh would have the original admitted behind the retry
+        and pay for both; below it the slot is already spent, so the body
+        was admitted and its outcome is the thing worth asking for. Above
+        it the facilitator has not reached that slot and never will while
+        the gap stands, so the body is dead and a fresh one is signed.
         """
         pending = self._take_unresolved(call_key)
         if pending is None:
@@ -755,13 +757,14 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         prepared, nonce = pending
         if nonce > int(info.next_nonce):
             _logger.info(
-                "mech call has an unresolved request at slot %s, which the "
-                "facilitator has moved past; signing afresh",
+                "mech call has an unresolved request at slot %s, above the "
+                "facilitator's first free slot, which it will never reach; "
+                "signing afresh",
                 nonce,
             )
-            # Nothing will ever settle it, and the marketplace consumes a
-            # requester's slots in order, so leaving it reserved would stall
-            # every later request for this Safe.
+            # The marketplace consumes a requester's slots in order, so
+            # nothing will ever settle this one and leaving it reserved
+            # would stall every later request for this Safe.
             self._release(nonce)
             return None
         _logger.info(
@@ -852,7 +855,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         call = self._upstream_call(request)
         call_key = json.dumps(call, sort_keys=True)
         # Read first: whether a stored body is worth replaying depends on
-        # whether the facilitator has moved past the slot it was signed at.
+        # where the facilitator's first free slot sits relative to it.
         info = self._fetch_info(deadline, **kwargs)
         self._drop_stranded_slot(info)
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
