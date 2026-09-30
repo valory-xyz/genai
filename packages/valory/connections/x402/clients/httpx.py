@@ -56,10 +56,7 @@ class HttpxHooks:
             return response
 
         # The paid retry below goes out on a client carrying no hooks, so a
-        # 402 seen here is always an unpaid first attempt. Tracking that on
-        # the hooks instead would be shared by every concurrent call through
-        # this client, and one already in its retry would have the others
-        # hand their 402 back unpaid.
+        # 402 seen here is always an unpaid first attempt.
         try:
             if not response.request:
                 raise MissingRequestConfigError("Missing request configuration")

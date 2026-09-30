@@ -878,13 +878,7 @@ class TestX402HttpxConcurrentCallsEachPay:
     def test_a_402_arriving_during_another_calls_retry_is_still_paid(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Otherwise the second call hands its 402 straight back to the caller.
-
-        The paid retry goes out on a client with no hooks, so nothing it
-        returns can re-enter here and there is no recursion to guard
-        against. A guard on the hooks would be shared by every concurrent
-        call through this client rather than scoped to one.
-        """
+        """Otherwise the second call hands its 402 straight back to the caller."""
         hooks = HttpxHooks(MagicMock(), retry_timeout=(2.5, 7.5))
         started = asyncio.Event()
         release = asyncio.Event()
