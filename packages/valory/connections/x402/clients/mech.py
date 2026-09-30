@@ -27,10 +27,12 @@ call into a Safe-signed marketplace request on ``/mech/{api}/{chain}``.
 import base64
 import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -49,7 +51,10 @@ _logger = logging.getLogger(__name__)
 # The deadline only bounds replay of a captured body; the facilitator
 # clamps it to its own cap.
 DEFAULT_REQUEST_TTL_SECS = 120
-DEFAULT_NONCE_RETRIES = 2
+# A nonce collision clears when the slot ahead settles, which is a
+# settlement tick away, so the retry is bounded by the call's deadline
+# rather than by a count.
+DEFAULT_NONCE_RETRY_WAIT_SECS = 2.0
 # The facilitator may hold one POST for its admission wait (25s) plus RPC
 # reads plus its upstream deadline (120s); an abandoned call is still charged.
 FACILITATOR_WORST_CASE_SECS = 25.0 + 120.0
@@ -63,6 +68,52 @@ DEFAULT_INFO_RATE_LIMIT_RETRIES = 3
 # struggling facilitator cannot hold the connection's single worker for
 # many minutes: every send's read timeout is clamped to what is left.
 DEFAULT_TOTAL_DEADLINE_SECS = 300.0
+# A call that starts with less than this left signs, posts, and is cut
+# off while the facilitator serves it, which is charged. Refuse instead.
+# Must stay below ``total_deadline_secs`` or every call gives up.
+DEFAULT_MIN_CALL_BUDGET_SECS = 30.0
+# Picks the slot to sign the next request at. The default asks the
+# facilitator, which is right while it is the only thing paying from the
+# Safe. An agent that also sends mech requests of its own passes its own
+# counter, because neither server can see the other's unsettled slots.
+NonceSource = Callable[["RequesterInfo"], int]
+
+
+def _facilitator_nonce(info: "RequesterInfo") -> int:
+    """Return the slot the facilitator says is free.
+
+    :param info: the facilitator's requester info.
+    :return: the slot to sign at.
+    """
+    return info.next_nonce
+
+
+# Replayable bodies kept per adapter, and how long one is kept before it
+# is evicted to bound the store.
+_UNRESOLVED_MAX = 32
+_UNRESOLVED_TTL_SECS = 900.0
+
+# One lock per (chain, Safe) for the whole process. The marketplace nonce
+# belongs to the Safe, not to a session, and an agent holds one session per
+# upstream api, so a per-session lock would let two of them race.
+_SAFE_LOCKS: Dict[Tuple[str, str], threading.Lock] = {}
+_SAFE_LOCKS_GUARD = threading.Lock()
+
+
+def _safe_lock(chain: str, safe_address: str) -> threading.Lock:
+    """Return the process-wide lock for one Safe on one chain.
+
+    :param chain: facilitator chain slug.
+    :param safe_address: the Safe that pays for the calls.
+    :return: the lock shared by every adapter for that Safe.
+    """
+    key = (chain.lower(), safe_address.lower())
+    with _SAFE_LOCKS_GUARD:
+        lock = _SAFE_LOCKS.get(key)
+        if lock is None:
+            lock = _SAFE_LOCKS[key] = threading.Lock()
+        return lock
+
 
 _NONCE_MISMATCH = "nonce_mismatch"
 _IN_PROGRESS = "request_in_progress"
@@ -263,7 +314,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         facilitator_base_url: str,
         max_delivery_rate: Optional[int] = None,
         ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
-        nonce_retries: int = DEFAULT_NONCE_RETRIES,
+        nonce_retry_wait_secs: float = DEFAULT_NONCE_RETRY_WAIT_SECS,
+        min_call_budget_secs: float = DEFAULT_MIN_CALL_BUDGET_SECS,
+        nonce_source: Optional[NonceSource] = None,
         default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
         total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
         **kwargs: Any,
@@ -277,10 +330,17 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param facilitator_base_url: origin of the facilitator, no path.
         :param max_delivery_rate: refuse to sign a rate above this (base units).
         :param ttl_secs: how long a signed request stays valid.
-        :param nonce_retries: how many nonce collisions to retry through.
+        :param nonce_retry_wait_secs: pause between nonce-collision retries,
+            which continue until the call's deadline.
+        :param min_call_budget_secs: refuse to sign with less than this left.
+        :param nonce_source: picks the slot to sign at, given the
+            facilitator's info. Defaults to the slot the facilitator
+            reports. Pass the agent's own counter when something else
+            pays from the same Safe.
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
         :param kwargs: passed to ``HTTPAdapter``.
+        :raises ValueError: when the budget floor is not below the deadline.
         """
         super().__init__(**kwargs)
         self.total_deadline_secs = total_deadline_secs
@@ -291,11 +351,23 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self.facilitator_base_url = facilitator_base_url.rstrip("/")
         self.max_delivery_rate = max_delivery_rate
         self.ttl_secs = ttl_secs
-        self.nonce_retries = nonce_retries
+        self.nonce_retry_wait_secs = nonce_retry_wait_secs
+        if min_call_budget_secs >= total_deadline_secs:
+            raise ValueError(
+                f"min_call_budget_secs ({min_call_budget_secs:.0f}s) must be "
+                f"below total_deadline_secs ({total_deadline_secs:.0f}s), or "
+                "every call is refused before it signs anything"
+            )
+        self.min_call_budget_secs = min_call_budget_secs
+        self._nonce_source: NonceSource = nonce_source or _facilitator_nonce
         self._default_timeout = default_timeout
-        # (upstream-call key, signed POST) of the last call whose outcome is
-        # unknown; replayed before signing anything new for the same call.
-        self._unresolved: Optional[Tuple[str, requests.PreparedRequest]] = None
+        # Signed POSTs whose outcome is unknown, one entry per upstream call
+        # so a second call does not discard the first one's replay.
+        self._unresolved: "OrderedDict[str, Tuple[requests.PreparedRequest, int, float]]" = (
+            OrderedDict()
+        )
+        # One call at a time per Safe; see ``_safe_lock``.
+        self._lock = _safe_lock(self.chain, self.safe_address)
         self._origin = urlsplit(self.facilitator_base_url)
 
     def _upstream_call(self, request: requests.PreparedRequest) -> Dict[str, Any]:
@@ -323,6 +395,25 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 f"mech call exceeded its {DEFAULT_TOTAL_DEADLINE_SECS:.0f}s budget"
             )
         time.sleep(secs)
+
+    def _check_budget(self, deadline: float) -> None:
+        """Refuse a call that cannot finish, instead of paying to be cut off.
+
+        :param deadline: monotonic instant after which the call gives up.
+        :raises MechDeadlineExceededError: with too little budget left.
+
+        The facilitator charges for a call it served even when the client
+        walked away, so a call that starts with less than the minimum left
+        is refused before it signs anything.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MechDeadlineExceededError("mech call exceeded its budget")
+        if remaining < self.min_call_budget_secs:
+            raise MechDeadlineExceededError(
+                f"mech call has {remaining:.1f}s left, below the "
+                f"{self.min_call_budget_secs:.0f}s needed to see it through"
+            )
 
     @staticmethod
     def _check(deadline: float) -> None:
@@ -463,32 +554,91 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 f"{type(exc).__name__}"
             ) from exc
 
+    def _remember_unresolved(
+        self, call_key: str, prepared: requests.PreparedRequest, nonce: int
+    ) -> None:
+        """Keep ``prepared`` replayable for ``call_key`` until it expires.
+
+        :param call_key: canonical form of the upstream call being sent.
+        :param prepared: the signed POST whose outcome is unknown.
+        :param nonce: the slot it was signed at, so a later call can tell
+            whether the facilitator ever admitted it.
+        """
+        now = time.monotonic()
+        self._unresolved[call_key] = (prepared, nonce, now + _UNRESOLVED_TTL_SECS)
+        self._unresolved.move_to_end(call_key)
+        for key in [k for k, (_p, _n, e) in self._unresolved.items() if e <= now]:
+            del self._unresolved[key]
+        while len(self._unresolved) > _UNRESOLVED_MAX:
+            self._unresolved.popitem(last=False)
+
+    def _take_unresolved(
+        self, call_key: str
+    ) -> Optional[Tuple[requests.PreparedRequest, int]]:
+        """Remove and return the replayable body for ``call_key`` and its slot.
+
+        :param call_key: canonical form of the upstream call being sent.
+        :return: the stored POST and its slot, or ``None`` when there is none.
+
+        The stored expiry only drives eviction. Whether a body is still
+        worth anything is the facilitator's call, and it answers a stale
+        one with ``request_expired``, which signs afresh.
+        """
+        entry = self._unresolved.pop(call_key, None)
+        return None if entry is None else (entry[0], entry[1])
+
     def _resume_unresolved(
-        self, call_key: str, deadline: float, **kwargs: Any
+        self, call_key: str, info: "RequesterInfo", deadline: float, **kwargs: Any
     ) -> Optional[requests.Response]:
         """Replay the last unresolved signed body if it was for this same upstream call.
 
         :param call_key: canonical form of the upstream call being sent.
+        :param info: the facilitator's requester info, read for this call.
         :param deadline: monotonic instant after which no more waiting is done.
         :param kwargs: adapter send arguments.
         :return: the stored response, or ``None`` when a fresh request must be signed.
+
+        Replayed while the facilitator's first free slot is still at or
+        above the one the body carries. At it, the body may be queued for
+        admission, and signing afresh would have the original admitted
+        behind the retry and pay for both. Above it the slot is spent, so
+        the body can never be admitted there and a fresh one is signed.
         """
-        if self._unresolved is None or self._unresolved[0] != call_key:
+        pending = self._take_unresolved(call_key)
+        if pending is None:
+            return None
+        prepared, nonce = pending
+        if nonce > int(info.next_nonce):
+            _logger.info(
+                "mech call has an unresolved request at slot %s, which the "
+                "facilitator has moved past; signing afresh",
+                nonce,
+            )
             return None
         _logger.info(
             "mech call has an unresolved request; asking for its outcome first"
         )
-        response = self._post_signed(self._unresolved[1], deadline, **kwargs)
+        try:
+            response = self._post_signed(prepared, deadline, **kwargs)
+        except BaseException:
+            # The outcome is no clearer than it was, so the body has to stay
+            # replayable; losing it here is what makes the next call pay twice.
+            self._remember_unresolved(call_key, prepared, nonce)
+            raise
         if 200 <= response.status_code < 300:
-            self._unresolved = None
             return response
         parsed = _facilitator_error(response)
-        if parsed is not None and parsed[0] == _IN_PROGRESS:
+        if parsed is None:
+            # An upstream answer passed through: the call was served and
+            # charged, so it is the caller's to handle, not one to re-sign.
+            return response
+        if parsed[0] == _IN_PROGRESS:
+            # Still being served: keep it replayable for the next attempt.
+            self._remember_unresolved(call_key, prepared, nonce)
             raise MechRequestRejectedError(
                 status_code=response.status_code, error=parsed[0], detail=parsed[1]
             )
         # Refused (expired, stale nonce, ...): it was never served, sign afresh.
-        self._unresolved = None
         return None
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]
@@ -500,82 +650,116 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         """
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = self._default_timeout
+        # Started before the lock, so time spent waiting for another thread
+        # counts against this call's budget instead of extending it.
         deadline = time.monotonic() + self.total_deadline_secs
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise MechDeadlineExceededError(
+                "mech call gave up waiting for another request on this Safe"
+            )
+        try:
+            self._check_budget(deadline)
+            return self._send_locked(request, deadline, **kwargs)
+        finally:
+            self._lock.release()
 
+    def _send_locked(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self, request: requests.PreparedRequest, deadline: float, **kwargs: Any
+    ) -> requests.Response:
+        """Run one signed call; the caller holds the per-Safe lock.
+
+        :param request: the caller's prepared request to the upstream path.
+        :param deadline: monotonic instant after which the call gives up.
+        :param kwargs: adapter send arguments.
+        :return: the upstream response as returned by the facilitator.
+        """
         call = self._upstream_call(request)
         call_key = json.dumps(call, sort_keys=True)
-        resumed = self._resume_unresolved(call_key, deadline, **kwargs)
+        # Read first: whether a stored body is worth replaying depends on
+        # whether the facilitator has moved past the slot it was signed at.
+        info = self._fetch_info(deadline, **kwargs)
+        resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
             return resumed
-        info = self._fetch_info(deadline, **kwargs)
-        nonce = info.next_nonce
+        nonce = self._nonce_source(info)
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_budget: Optional[float] = None
 
         attempt = 0
-        while attempt <= self.nonce_retries:
-            body = self._signed_body(call, info, nonce)
-            prepared = requests.Request(
-                "POST",
-                url,
-                headers={"Content-Type": "application/json"},
-                data=json.dumps(body),
-            ).prepare()
-            self._check(deadline)
-            # Remembered until a definite outcome: if the deadline or the
-            # transport fails after this POST, the next call for the same
-            # upstream request replays it instead of paying twice.
-            self._unresolved = (call_key, prepared)
-            response = self._post_signed(prepared, deadline, **kwargs)
-            if 200 <= response.status_code < 300:
-                self._unresolved = None
-                return response
+        refused: Optional[Tuple[int, Any, int]] = None
+        try:
+            while True:
+                body = self._signed_body(call, info, nonce)
+                prepared = requests.Request(
+                    "POST",
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(body),
+                ).prepare()
+                # Before every signed POST, not just the first: a retry that
+                # starts with seconds left is served and charged the same way.
+                self._check_budget(deadline)
+                # Remembered until a definite outcome: if the deadline or the
+                # transport fails after this POST, the next call for the same
+                # upstream request replays it instead of paying twice.
+                self._remember_unresolved(call_key, prepared, nonce)
+                response = self._post_signed(prepared, deadline, **kwargs)
+                if 200 <= response.status_code < 300:
+                    self._take_unresolved(call_key)
+                    return response
 
-            parsed = _facilitator_error(response)
-            if parsed is None:
-                self._unresolved = None
-                return response
-            error, detail, context = parsed
-            if error != _IN_PROGRESS:
-                self._unresolved = None
-            if response.status_code == 402:
-                raise MechDepositRequiredError(
-                    balance=int(context.get("balance", 0)),
-                    reserved=int(context.get("reserved", 0)),
-                    available=int(context.get("available", 0)),
-                    required=int(context.get("required", 0)),
-                )
-            if response.status_code == 409 and error == _BUSY:
-                # Another call from this Safe is in flight; when it is done
-                # the next nonce may have moved, so re-read it.
-                if busy_budget is None:
-                    busy_budget = _wait_budget_secs(response, DEFAULT_BUSY_RETRIES)
-                wait = _retry_after_secs(response)
-                if wait <= busy_budget:
-                    busy_budget -= wait
-                    self._wait(deadline, wait)
+                parsed = _facilitator_error(response)
+                if parsed is None:
+                    self._take_unresolved(call_key)
+                    return response
+                error, detail, context = parsed
+                if error != _IN_PROGRESS:
+                    self._take_unresolved(call_key)
+                if response.status_code == 402:
+                    raise MechDepositRequiredError(
+                        balance=int(context.get("balance", 0)),
+                        reserved=int(context.get("reserved", 0)),
+                        available=int(context.get("available", 0)),
+                        required=int(context.get("required", 0)),
+                    )
+                if response.status_code == 409 and error == _BUSY:
+                    # Another call from this Safe is in flight; when it is done
+                    # the next nonce may have moved, so re-read it.
+                    if busy_budget is None:
+                        busy_budget = _wait_budget_secs(response, DEFAULT_BUSY_RETRIES)
+                    wait = _retry_after_secs(response)
+                    if wait <= busy_budget:
+                        busy_budget -= wait
+                        self._wait(deadline, wait)
+                        info = self._fetch_info(deadline, **kwargs)
+                        nonce = self._nonce_source(info)
+                        continue
+                if response.status_code == 409 and error == _NONCE_MISMATCH:
+                    # The slot clears when the request ahead settles, so keep
+                    # trying until the deadline rather than after a set count.
+                    attempt += 1
+                    refused = (nonce, context.get("expected"), attempt)
+                    _logger.info(
+                        "mech slot %s refused (facilitator expects %s), attempt %s",
+                        *refused,
+                    )
+                    self._wait(deadline, self.nonce_retry_wait_secs)
                     info = self._fetch_info(deadline, **kwargs)
-                    nonce = info.next_nonce
+                    nonce = self._nonce_source(info)
                     continue
-            if (
-                response.status_code == 409
-                and error == _NONCE_MISMATCH
-                and attempt < self.nonce_retries
-            ):
-                nonce = int(context["expected"])
-                attempt += 1
-                _logger.info(
-                    "mech nonce collision, retrying at slot %s (attempt %s)",
-                    nonce,
-                    attempt,
+                raise MechRequestRejectedError(
+                    status_code=response.status_code, error=error, detail=detail
                 )
-                continue
-            raise MechRequestRejectedError(
-                status_code=response.status_code, error=error, detail=detail
-            )
-        raise MechRequestRejectedError(  # pragma: no cover - loop always returns or raises
-            status_code=409, error=_NONCE_MISMATCH, detail="nonce retries exhausted"
-        )
+        except MechDeadlineExceededError as exc:
+            if refused is None:
+                raise
+            # Without this the error only says the budget ran out, which
+            # reads like a slow upstream rather than a slot held elsewhere.
+            slot, expected, attempts = refused
+            raise MechDeadlineExceededError(
+                f"{exc} after {attempts} attempts at slot {slot}; the "
+                f"facilitator expected {expected}"
+            ) from exc
 
 
 def mech_requests(  # pylint: disable=too-many-arguments
