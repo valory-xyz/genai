@@ -51,9 +51,8 @@ _logger = logging.getLogger(__name__)
 # The deadline only bounds replay of a captured body; the facilitator
 # clamps it to its own cap.
 DEFAULT_REQUEST_TTL_SECS = 120
-# A nonce collision clears when the slot ahead settles, which is a
-# settlement tick away, so the retry is bounded by the call's deadline
-# rather than by a count.
+# Pause between retries of a refused slot. How long they go on for is
+# ``nonce_retry_budget_secs`` below, not a count and not the call's deadline.
 DEFAULT_NONCE_RETRY_WAIT_SECS = 2.0
 # A refused slot clears when whatever holds the slot below it settles, and
 # the whole of that wait is spent holding this Safe's lock. Waiting out the
@@ -131,22 +130,30 @@ class SlotRegistry:
         """
         return self._live
 
-    def reserve(self, chain: str, safe_address: str, floor: int) -> int:
+    def reserve(
+        self, chain: str, safe_address: str, floor: int, settled_below: int
+    ) -> int:
         """Take the lowest free slot at or above ``floor``.
 
         :param chain: facilitator chain slug.
         :param safe_address: the Safe that pays for the call.
-        :param floor: lowest slot that may be used, from whichever server
-            was asked. Everything below it has settled and is gone for good.
+        :param floor: lowest slot worth trying, from whichever server was
+            asked. A server will refuse anything below its own answer.
+        :param settled_below: the on-chain counter. Only slots below this
+            have settled and can be forgotten.
         :return: the slot to sign at, now reserved.
 
-        Slots below ``floor`` are dropped on the way in, since keeping
-        settled ones would leave the set growing forever.
+        The two bounds are deliberately separate. A facilitator's first
+        free slot sits above its own unsettled rows, so pruning at that
+        number would forget slots it is still holding, and the next caller
+        flooring at the on-chain counter would be handed one of them back.
         """
         key = (chain.lower(), safe_address.lower())
         with self._guard:
             live = self._live.setdefault(key, set())
-            live.difference_update([slot for slot in live if slot < floor])
+            live.difference_update(
+                [slot for slot in live if slot < settled_below]
+            )
             slot = floor
             while slot in live:
                 slot += 1
@@ -185,15 +192,18 @@ def slot_registry() -> SlotRegistry:
     return _SLOTS
 
 
-def reserve_slot(chain: str, safe_address: str, floor: int) -> int:
+def reserve_slot(
+    chain: str, safe_address: str, floor: int, settled_below: int
+) -> int:
     """Take the lowest free slot at or above ``floor``; see ``SlotRegistry``.
 
     :param chain: facilitator chain slug.
     :param safe_address: the Safe that pays for the call.
-    :param floor: lowest slot that may be used.
+    :param floor: lowest slot worth trying.
+    :param settled_below: the on-chain counter; only slots below it have settled.
     :return: the slot to sign at, now reserved.
     """
-    return _SLOTS.reserve(chain, safe_address, floor)
+    return _SLOTS.reserve(chain, safe_address, floor, settled_below)
 
 
 def release_slot(chain: str, safe_address: str, slot: int) -> None:
@@ -288,6 +298,10 @@ class RequesterInfo:
     payment_type: bytes
     delivery_rates: Dict[str, int]
     next_nonce: int
+    # ``mapNonces`` on the marketplace. Everything below it has settled;
+    # ``next_nonce`` is higher whenever the facilitator holds rows of its
+    # own, so the two are not interchangeable.
+    on_chain_nonce: int
     balance: int
     available: int
     max_ttl_secs: int
@@ -314,6 +328,7 @@ class RequesterInfo:
             payment_type=bytes.fromhex(payment_type[2:]),
             delivery_rates={k: int(v) for k, v in dict(data["delivery_rates"]).items()},
             next_nonce=int(data["next_nonce"]),
+            on_chain_nonce=int(data["on_chain_nonce"]),
             balance=int(data["balance"]),
             available=int(data["available"]),
             max_ttl_secs=int(data["max_ttl_secs"]),
@@ -434,7 +449,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             slot before giving up, so the per-Safe lock is not held for the
             whole deadline.
         :param nonce_retry_wait_secs: pause between nonce-collision retries,
-            which continue until the call's deadline.
+            which continue until ``nonce_retry_budget_secs`` runs out.
         :param min_call_budget_secs: refuse to sign with less than this left.
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
@@ -686,6 +701,37 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         entry = self._unresolved.pop(call_key, None)
         return None if entry is None else (entry[0], entry[1])
 
+    def _drop_stranded_slot(self, info: "RequesterInfo") -> None:
+        """Free a slot held by a body the facilitator can no longer admit.
+
+        :param info: the facilitator's requester info, read for this call.
+
+        A POST whose outcome never resolved keeps its slot, because the
+        facilitator may still be serving it. If it was never admitted the
+        facilitator's first free slot stays at that number, and once the
+        signed request has expired it can never be admitted, so nothing
+        will ever move the counter. Left alone that slot blocks every
+        later call from this Safe until the process restarts.
+        """
+        now = info.server_time if info.server_time is not None else int(time.time())
+        for call_key, (prepared, nonce, _ttl) in list(self._unresolved.items()):
+            if nonce != int(info.next_nonce):
+                continue
+            try:
+                expires_at = int(json.loads(prepared.body or b"{}")["expires_at"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if expires_at > now:
+                continue
+            _logger.info(
+                "mech slot %s is held by a request that expired at %s and the "
+                "facilitator never admitted it; handing the slot back",
+                nonce,
+                expires_at,
+            )
+            del self._unresolved[call_key]
+            self._release(nonce)
+
     def _resume_unresolved(
         self, call_key: str, info: "RequesterInfo", deadline: float, **kwargs: Any
     ) -> Optional[requests.Response]:
@@ -697,20 +743,21 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param kwargs: adapter send arguments.
         :return: the stored response, or ``None`` when a fresh request must be signed.
 
-        A body is only worth replaying once the facilitator has moved past
-        the slot it was signed at, which is the only sign it was admitted.
-        Below that the slot is still free, so nothing was served or charged,
-        and the body is dropped rather than sent at a slot that may since
-        have been handed to something else paying from this Safe.
+        Replayed while the facilitator's first free slot is still at or
+        above the one the body carries. At it, the body may be waiting for
+        admission, and signing afresh would have the original admitted
+        later and pay for both. Above it, the slot is gone and so is any
+        chance this body is still live, so a fresh one is signed rather
+        than sending it at a slot that has moved on.
         """
         pending = self._take_unresolved(call_key)
         if pending is None:
             return None
         prepared, nonce = pending
-        if nonce >= int(info.next_nonce):
+        if nonce > int(info.next_nonce):
             _logger.info(
                 "mech call has an unresolved request at slot %s, which the "
-                "facilitator never admitted; signing afresh",
+                "facilitator has moved past without admitting; signing afresh",
                 nonce,
             )
             # Nothing will ever settle it, and the marketplace consumes a
@@ -776,7 +823,12 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         unsettled rows, so it is a floor and not the whole picture: it
         cannot see slots held by anything else paying from this Safe.
         """
-        return reserve_slot(self.chain, self.safe_address, int(info.next_nonce))
+        return reserve_slot(
+            self.chain,
+            self.safe_address,
+            int(info.next_nonce),
+            int(info.on_chain_nonce),
+        )
 
     def _release(self, nonce: int) -> None:
         """Hand back a slot the facilitator refused before serving it.
@@ -800,6 +852,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         # Read first: whether a stored body is worth replaying depends on
         # whether the facilitator has moved past the slot it was signed at.
         info = self._fetch_info(deadline, **kwargs)
+        self._drop_stranded_slot(info)
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
             return resumed
@@ -866,8 +919,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                         nonce = self._reserve(info)
                         continue
                 if response.status_code == 409 and error == _NONCE_MISMATCH:
-                    # The slot clears when the request ahead settles, so keep
-                    # trying until the deadline rather than after a set count.
+                    # The slot clears when the request ahead settles, which is
+                    # a settlement tick away, so this waits on time rather than
+                    # a count, bounded by ``nonce_retry_budget_secs``.
                     attempt += 1
                     refused = (nonce, context.get("expected"), attempt)
                     _logger.info(

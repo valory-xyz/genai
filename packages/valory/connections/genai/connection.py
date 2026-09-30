@@ -181,8 +181,6 @@ class GenaiConnection(BaseSyncConnection):
         # whose outcome is unknown and replays it on the next identical
         # call, which only works if one session serves every request.
         self._mech_session: Optional[requests.Session] = None
-        # Lowest slot the next mech call may sign at, taken from the
-        # request payload. ``None`` leaves the facilitator's own answer.
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
