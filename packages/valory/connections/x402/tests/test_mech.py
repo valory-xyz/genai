@@ -260,9 +260,9 @@ def _empty_slot_registry() -> Any:
     The registry is process-wide by design, so without this one test's
     slot becomes the next test's floor.
     """
-    slot_registry().live.clear()
+    slot_registry().clear()
     yield
-    slot_registry().live.clear()
+    slot_registry().clear()
 
 
 def _patched_send(side_effect: Any):
@@ -439,6 +439,117 @@ def test_a_served_slot_stays_held_until_the_floor_moves_past_it() -> None:
         _INFO_JSON["next_nonce"] + 1
     )
     assert slot_registry().live[key] == {_INFO_JSON["next_nonce"] + 1}
+
+
+class TestTheFacilitatorOwnsTheSlotsItReports:
+    """Two counters cannot express which slots a facilitator holds.
+
+    ``next_nonce`` is the first slot with no live row of its own, so a slot
+    taken by another payer from the same Safe truncates the run and hides
+    every row above it. Reading the reported set instead is also the only
+    way this process can learn that a row was given up: the chain counter
+    can never pass a slot that never settled.
+    """
+
+    _KEY = (_CHAIN.lower(), _SAFE.lower())
+
+    @staticmethod
+    def _info(*, on_chain: int, next_nonce: int, held: list) -> dict:
+        return {
+            **_INFO_JSON,
+            "on_chain_nonce": on_chain,
+            "next_nonce": next_nonce,
+            "held": len(held),
+            "held_nonces": held,
+        }
+
+    def test_a_reported_slot_is_not_offered_to_the_next_caller(self) -> None:
+        """The gap below a reported row is free; the row itself is not."""
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [8])
+
+        first = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        second = reserve_slot(_CHAIN, _SAFE, 7, 7)
+
+        assert (first, second) == (7, 9), "8 is the facilitator's row"
+
+    def test_a_row_the_facilitator_gives_up_frees_its_slot(self) -> None:
+        """Nothing else can notice, so nothing else can free it.
+
+        The chain counter never passes a slot whose delivery never settled,
+        so a slot kept after the facilitator dropped its row would be held
+        for the life of the process and every later call from the Safe
+        would sign above it and be refused.
+        """
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        # Served, so it is the facilitator's row now rather than ours.
+        assert slot_registry().live[self._KEY] == {7}
+        # Its next report no longer carries the row: it gave up on it.
+        slot_registry().publish(_CHAIN, _SAFE, [])
+
+        assert slot_registry().live == {}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 7
+
+    def test_a_shrinking_report_drops_only_the_rows_that_went_away(self) -> None:
+        """Each report replaces the last rather than adding to it.
+
+        Merging would mean a row could only ever be added, so one the
+        facilitator gave up on would stay held while its neighbours settled
+        normally, which is the case an empty report does not exercise.
+        """
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [7, 8])
+        assert registry.live[self._KEY] == {7, 8}
+
+        registry.publish(_CHAIN, _SAFE, [8])
+
+        assert registry.live[self._KEY] == {8}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 7
+
+    def test_a_served_slot_is_kept_while_it_is_still_reported(self) -> None:
+        """Freeing one it is still serving is the collision this prevents."""
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        slot_registry().publish(_CHAIN, _SAFE, [7])
+
+        assert slot_registry().live[self._KEY] == {7}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 8
+
+    def test_a_facilitator_that_reports_only_a_count_keeps_the_old_behaviour(
+        self,
+    ) -> None:
+        """Handing a slot to one that cannot retire it would hold it forever.
+
+        ``_INFO_JSON`` carries no ``held_nonces``, so this is the path taken
+        against a facilitator that predates the field.
+        """
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        # Still ours, so the chain counter prunes it once the delivery
+        # settles, which is all that can be done without the set.
+        assert slot_registry().live[self._KEY] == {_INFO_JSON["next_nonce"]}
+        assert (
+            reserve_slot(
+                _CHAIN, _SAFE, _INFO_JSON["next_nonce"] + 1, _INFO_JSON["next_nonce"] + 1
+            )
+            == _INFO_JSON["next_nonce"] + 1
+        )
+        assert slot_registry().live[self._KEY] == {_INFO_JSON["next_nonce"] + 1}
 
 
 def test_a_refused_slot_is_handed_straight_back() -> None:

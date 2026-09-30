@@ -32,7 +32,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -119,16 +119,84 @@ class SlotRegistry:
 
     def __init__(self) -> None:
         """Start with no slots held for any Safe."""
-        self._live: Dict[Tuple[str, str], Set[int]] = {}
+        self._reserved: Dict[Tuple[str, str], Set[int]] = {}
+        self._published: Dict[Tuple[str, str], Set[int]] = {}
         self._guard = threading.Lock()
 
     @property
     def live(self) -> Dict[Tuple[str, str], Set[int]]:
-        """Return the slots in use per ``(chain, Safe)``, both lower case.
+        """Return every slot in use per ``(chain, Safe)``, both lower case.
 
-        :return: the registry contents, for inspection and for tests.
+        :return: a snapshot, reserved here plus reported by the facilitator.
+
+        A snapshot rather than the working set, because the two halves are
+        retired differently: one when a caller hands a slot back, the other
+        when the facilitator stops reporting it. Use ``clear`` to empty it.
         """
-        return self._live
+        with self._guard:
+            keys = set(self._reserved) | set(self._published)
+            merged = {
+                key: self._reserved.get(key, set()) | self._published.get(key, set())
+                for key in keys
+            }
+            return {key: slots for key, slots in merged.items() if slots}
+
+    def clear(self) -> None:
+        """Forget everything, for a process that wants a fresh start."""
+        with self._guard:
+            self._reserved.clear()
+            self._published.clear()
+
+    def publish(
+        self, chain: str, safe_address: str, slots: Iterable[int]
+    ) -> None:
+        """Replace what the facilitator is known to hold for ``safe_address``.
+
+        :param chain: facilitator chain slug.
+        :param safe_address: the Safe that pays for the call.
+        :param slots: the slots it reports holding, from its requester info.
+
+        Replaced wholesale rather than merged, because this is the only
+        thing that can retire one of its rows. A row it gives up stops
+        being reported, and nothing else in this process can tell: the
+        chain counter never passes a slot that never settled.
+
+        A slot it reports is its responsibility now, so it also stops
+        being one of ours; keeping both would mean nothing ever released it.
+        """
+        key = (chain.lower(), safe_address.lower())
+        with self._guard:
+            held = {int(slot) for slot in slots}
+            if held:
+                self._published[key] = held
+            else:
+                self._published.pop(key, None)
+            reserved = self._reserved.get(key)
+            if reserved is not None:
+                reserved.difference_update(held)
+                if not reserved:
+                    del self._reserved[key]
+
+    def hand_over(self, chain: str, safe_address: str, slot: int) -> None:
+        """Record that the facilitator has taken responsibility for ``slot``.
+
+        :param chain: facilitator chain slug.
+        :param safe_address: the Safe that pays for the call.
+        :param slot: the slot it acknowledged.
+
+        Between the acknowledgement and the next requester-info read, the
+        facilitator holds the slot but has not reported it yet. Without
+        this the slot would belong to nobody for that window and something
+        else paying from the Safe could sign it.
+        """
+        key = (chain.lower(), safe_address.lower())
+        with self._guard:
+            self._published.setdefault(key, set()).add(slot)
+            reserved = self._reserved.get(key)
+            if reserved is not None:
+                reserved.discard(slot)
+                if not reserved:
+                    del self._reserved[key]
 
     def reserve(
         self, chain: str, safe_address: str, floor: int, settled_below: int
@@ -150,14 +218,15 @@ class SlotRegistry:
         """
         key = (chain.lower(), safe_address.lower())
         with self._guard:
-            live = self._live.setdefault(key, set())
-            live.difference_update(
-                [slot for slot in live if slot < settled_below]
+            reserved = self._reserved.setdefault(key, set())
+            reserved.difference_update(
+                [slot for slot in reserved if slot < settled_below]
             )
+            in_use = reserved | self._published.get(key, set())
             slot = floor
-            while slot in live:
+            while slot in in_use:
                 slot += 1
-            live.add(slot)
+            reserved.add(slot)
             return slot
 
     def release(self, chain: str, safe_address: str, slot: int) -> None:
@@ -170,15 +239,18 @@ class SlotRegistry:
         The marketplace consumes a requester's slots in order, so a slot
         kept after a refusal is one nothing will ever settle, and every
         later request for the Safe queues behind it forever.
+
+        Only a slot reserved here. One the facilitator has reported is
+        retired by it dropping out of a later report, not by this.
         """
         key = (chain.lower(), safe_address.lower())
         with self._guard:
-            live = self._live.get(key)
-            if live is None:
+            reserved = self._reserved.get(key)
+            if reserved is None:
                 return
-            live.discard(slot)
-            if not live:
-                del self._live[key]
+            reserved.discard(slot)
+            if not reserved:
+                del self._reserved[key]
 
 
 _SLOTS = SlotRegistry()
@@ -305,6 +377,11 @@ class RequesterInfo:
     balance: int
     available: int
     max_ttl_secs: int
+    # The slots the facilitator holds. ``None`` from one that reports only
+    # how many, where they cannot be derived: ``next_nonce`` is the first
+    # slot with no live row, so a slot taken by another payer truncates the
+    # run and hides every row above it.
+    held_nonces: Optional[Tuple[int, ...]] = None
     # Facilitator clock (unix seconds) from the response's Date header, so
     # expires_at is not hostage to the agent's clock; None when absent.
     server_time: Optional[int] = None
@@ -332,6 +409,11 @@ class RequesterInfo:
             balance=int(data["balance"]),
             available=int(data["available"]),
             max_ttl_secs=int(data["max_ttl_secs"]),
+            held_nonces=(
+                tuple(int(slot) for slot in data["held_nonces"])
+                if data.get("held_nonces") is not None
+                else None
+            ),
         )
 
 
@@ -842,6 +924,35 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         """
         release_slot(self.chain, self.safe_address, nonce)
 
+    def _publish(self, info: "RequesterInfo") -> None:
+        """Record what the facilitator says it holds for this Safe.
+
+        :param info: the facilitator's requester info.
+
+        Skipped against a facilitator that reports only a count, where the
+        set cannot be worked out, and the older release-by-rule behaviour
+        stands instead.
+        """
+        if info.held_nonces is None:
+            return
+        slot_registry().publish(self.chain, self.safe_address, info.held_nonces)
+
+    def _hand_over(self, nonce: int, info: "RequesterInfo") -> None:
+        """Give a slot the facilitator has acknowledged over to it.
+
+        :param nonce: the slot it accepted.
+        :param info: the facilitator's requester info for this call.
+
+        Only against a facilitator that reports the slots it holds, since
+        that report is the only thing that retires one. Handing a slot to
+        one that reports a count alone would leave it held for the life of
+        the process, which is worse than keeping it ourselves: at least the
+        chain counter prunes ours once the delivery settles.
+        """
+        if info.held_nonces is None:
+            return
+        slot_registry().hand_over(self.chain, self.safe_address, nonce)
+
     def _send_locked(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self, request: requests.PreparedRequest, deadline: float, **kwargs: Any
     ) -> requests.Response:
@@ -857,6 +968,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         # Read first: whether a stored body is worth replaying depends on
         # where the facilitator's first free slot sits relative to it.
         info = self._fetch_info(deadline, **kwargs)
+        self._publish(info)
         self._drop_stranded_slot(info)
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
@@ -893,14 +1005,23 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 response = self._post_signed(prepared, deadline, **kwargs)
                 if 200 <= response.status_code < 300:
                     self._take_unresolved(call_key)
+                    # Its row from here. Kept as ours it would never be
+                    # released: the chain counter cannot pass a slot the
+                    # facilitator later gives up on, so only its own next
+                    # report can retire it.
+                    self._hand_over(nonce, info)
                     return response
 
                 parsed = _facilitator_error(response)
                 if parsed is None:
                     self._take_unresolved(call_key)
+                    self._hand_over(nonce, info)
                     return response
                 error, detail, context = parsed
-                if error != _IN_PROGRESS:
+                if error == _IN_PROGRESS:
+                    # Still being served at that slot, so it is its row.
+                    self._hand_over(nonce, info)
+                else:
                     self._take_unresolved(call_key)
                     consumed = False
                 if response.status_code == 402:
@@ -920,6 +1041,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                         busy_budget -= wait
                         self._wait(deadline, wait)
                         info = self._fetch_info(deadline, **kwargs)
+                        self._publish(info)
                         self._release(nonce)
                         nonce = self._reserve(info)
                         continue
@@ -947,6 +1069,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                         )
                     self._wait(deadline, self.nonce_retry_wait_secs)
                     info = self._fetch_info(deadline, **kwargs)
+                    self._publish(info)
                     self._release(nonce)
                     nonce = self._reserve(info)
                     continue
