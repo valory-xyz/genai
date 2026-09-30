@@ -24,3 +24,5 @@ benchmarks/
 # Local editor and assistant config, not repo content.
 /.claude/
 /claude-skills/
+/docs/PYTHON_312_UPGRADE_GUIDE.md
+/docs/UPGRADE_PLAN.md
