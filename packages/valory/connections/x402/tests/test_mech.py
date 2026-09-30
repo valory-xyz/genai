@@ -46,8 +46,12 @@ from packages.valory.connections.x402.clients.mech import (
     MechOutcomeUnknownError,
     MechRateExceededError,
     MechRequestRejectedError,
+    MechSlotHeldElsewhereError,
     RequesterInfo,
+    slot_registry,
     mech_requests,
+    release_slot,
+    reserve_slot,
 )
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
@@ -249,6 +253,18 @@ def _session_with(
     return _make
 
 
+@pytest.fixture(autouse=True)
+def _empty_slot_registry() -> Any:
+    """Start every test with no slots held for any Safe.
+
+    The registry is process-wide by design, so without this one test's
+    slot becomes the next test's floor.
+    """
+    slot_registry().clear()
+    yield
+    slot_registry().clear()
+
+
 def _patched_send(side_effect: Any):
     """Patch ``HTTPAdapter.send`` with an arbitrary stand-in."""
     return patch.object(
@@ -386,21 +402,415 @@ def test_a_refused_slot_is_re_asked_of_the_source_not_taken_from_the_response() 
     assert _posted_body(fake, 0)["request_id"] != _posted_body(fake, 1)["request_id"]
 
 
-def test_an_injected_nonce_source_overrides_the_facilitators_view() -> None:
-    """An agent that also sends mech requests of its own owns the counter.
+def test_a_slot_held_elsewhere_in_the_process_is_stepped_over() -> None:
+    """The facilitator's answer is a floor, not the whole picture.
 
-    Neither server can see the other's unsettled slots, so the agent's
-    count is the only one that accounts for both.
+    It accounts for its own unsettled rows and nothing else. A mech
+    request signed by a skill in the same agent is invisible to it, so
+    signing at its answer would put two requests on one slot.
     """
     fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
-    session = _session_with(fake, nonce_source=lambda _info: 42)()
+    # Something else in this process is already holding the slot the
+    # facilitator is about to report.
+    held = reserve_slot(_CHAIN, _SAFE, _INFO_JSON["next_nonce"], _INFO_JSON["next_nonce"])
+    session = _session_with(fake)()
 
     with _patched(fake):
         response = session.get(f"{_FACILITATOR}/x")
 
     assert response.status_code == 200
-    # 42 from the agent, not the 7 the facilitator reported.
-    assert _posted_body(fake, 0)["nonce"] == "42"
+    assert held == _INFO_JSON["next_nonce"]
+    assert _posted_body(fake, 0)["nonce"] == str(held + 1)
+
+
+def test_a_served_slot_stays_held_until_the_floor_moves_past_it() -> None:
+    """Handing back a slot the facilitator is serving would re-issue it."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        session.get(f"{_FACILITATOR}/x")
+
+    key = (_CHAIN.lower(), _SAFE.lower())
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"]}
+    # Settlement moves the on-chain counter, and with it the facilitator's
+    # answer; the slot is gone for good and is pruned on the next reserve.
+    assert reserve_slot(_CHAIN, _SAFE, _INFO_JSON["next_nonce"] + 1, _INFO_JSON["next_nonce"] + 1) == (
+        _INFO_JSON["next_nonce"] + 1
+    )
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"] + 1}
+
+
+class TestTheFacilitatorOwnsTheSlotsItReports:
+    """Two counters cannot express which slots a facilitator holds.
+
+    ``next_nonce`` is the first slot with no live row of its own, so a slot
+    taken by another payer from the same Safe truncates the run and hides
+    every row above it. Reading the reported set instead is also the only
+    way this process can learn that a row was given up: the chain counter
+    can never pass a slot that never settled.
+    """
+
+    _KEY = (_CHAIN.lower(), _SAFE.lower())
+
+    @staticmethod
+    def _info(*, on_chain: int, next_nonce: int, held: list) -> dict:
+        return {
+            **_INFO_JSON,
+            "on_chain_nonce": on_chain,
+            "next_nonce": next_nonce,
+            "held": len(held),
+            "held_nonces": held,
+        }
+
+    def test_a_reported_slot_is_not_offered_to_the_next_caller(self) -> None:
+        """The gap below a reported row is free; the row itself is not."""
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [8])
+
+        first = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        second = reserve_slot(_CHAIN, _SAFE, 7, 7)
+
+        assert (first, second) == (7, 9), "8 is the facilitator's row"
+
+    def test_a_row_the_facilitator_gives_up_frees_its_slot(self) -> None:
+        """Nothing else can notice, so nothing else can free it.
+
+        The chain counter never passes a slot whose delivery never settled,
+        so a slot kept after the facilitator dropped its row would be held
+        for the life of the process and every later call from the Safe
+        would sign above it and be refused.
+        """
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        # Served, so it is the facilitator's row now rather than ours.
+        assert slot_registry().live[self._KEY] == {7}
+        # Its next report no longer carries the row: it gave up on it.
+        slot_registry().publish(_CHAIN, _SAFE, [])
+
+        assert slot_registry().live == {}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 7
+
+    def test_a_shrinking_report_drops_only_the_rows_that_went_away(self) -> None:
+        """Each report replaces the last rather than adding to it.
+
+        Merging would mean a row could only ever be added, so one the
+        facilitator gave up on would stay held while its neighbours settled
+        normally, which is the case an empty report does not exercise.
+        """
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [7, 8])
+        assert registry.live[self._KEY] == {7, 8}
+
+        registry.publish(_CHAIN, _SAFE, [8])
+
+        assert registry.live[self._KEY] == {8}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 7
+
+    def test_a_served_slot_is_kept_while_it_is_still_reported(self) -> None:
+        """Freeing one it is still serving is the collision this prevents."""
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        slot_registry().publish(_CHAIN, _SAFE, [7])
+
+        assert slot_registry().live[self._KEY] == {7}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 8
+
+    def test_an_expired_slot_is_retired_by_any_later_read(self) -> None:
+        """Not only by the adapter that stranded it.
+
+        Each api has its own adapter with its own replay memory, so a slot
+        stranded by one and then left idle would be invisible to the others
+        and to the on-chain mech path, and everything paying from the Safe
+        would queue behind a slot nothing will ever settle.
+        """
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        # Any later read, from any caller, with the clock past the expiry.
+        registry.publish(_CHAIN, _SAFE, [], now=1_001)
+
+        assert registry.live == {}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 7
+
+    def test_an_expired_slot_the_facilitator_claims_is_left_alone(self) -> None:
+        """It admitted the request before the body expired, so it holds it."""
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        registry.publish(_CHAIN, _SAFE, [7], now=1_001)
+
+        assert registry.live[self._KEY] == {7}
+        assert reserve_slot(_CHAIN, _SAFE, 7, 7) == 8
+
+    def test_a_slot_still_admissible_is_kept(self) -> None:
+        """The facilitator may yet admit it, so it is not free to reuse."""
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 2_000)
+
+        registry.publish(_CHAIN, _SAFE, [], now=1_001)
+
+        assert registry.live[self._KEY] == {7}
+
+    def test_a_slot_with_no_signed_body_yet_is_kept(self) -> None:
+        """Reserved but not signed: the call that took it still owns it."""
+        registry = slot_registry()
+        reserve_slot(_CHAIN, _SAFE, 7, 7)
+
+        registry.publish(_CHAIN, _SAFE, [], now=10**9)
+
+        assert registry.live[self._KEY] == {7}
+
+    def test_a_replayed_body_the_facilitator_serves_becomes_its_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The replay path acknowledges too, so it transfers the same way.
+
+        Left in our set, a row the facilitator later drops would never be
+        freed, which is the stall this whole mechanism exists to avoid.
+        """
+        clock = {"t": 1_000.0}
+        monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+        info = self._info(on_chain=7, next_nonce=7, held=[])
+
+        fake = _FakeFacilitator(
+            [
+                requests.exceptions.ReadTimeout("slow"),
+                _response(200, _UPSTREAM_BODY),
+            ]
+        )
+        fake.info = info
+        _deadline_fires_after_the_post(fake, clock)
+        session = _session_with(fake, account=Account.create())()
+
+        with _patched(fake):
+            with pytest.raises(MechDeadlineExceededError):
+                session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+            # Deliberately still reporting no rows, so the read at the start
+            # of this call cannot be what transfers the slot; only the
+            # acknowledgement of the replay can.
+            response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+        assert response.status_code == 200
+        # Its row rather than ours, and the difference shows: a report that
+        # no longer carries it retires it even while the signed body is
+        # still admissible, where one merely reserved would survive.
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [], now=1_000)
+
+        assert registry.live == {}
+
+    def test_a_replayed_body_answered_by_the_upstream_becomes_its_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An upstream answer passed through was served, so it was charged."""
+        clock = {"t": 1_000.0}
+        monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+        fake = _FakeFacilitator(
+            [
+                requests.exceptions.ReadTimeout("slow"),
+                # Not a facilitator error body, so it is the upstream's answer.
+                _response(500, b'{"candidates": []}'),
+            ]
+        )
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        _deadline_fires_after_the_post(fake, clock)
+        session = _session_with(fake, account=Account.create())()
+
+        with _patched(fake):
+            with pytest.raises(MechDeadlineExceededError):
+                session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+            response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+        assert response.status_code == 500
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [], now=1_000)
+
+        assert registry.live == {}
+
+    def test_a_stranded_slot_is_freed_once_its_body_can_no_longer_be_admitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end, so the expiry has to be recorded when the body is signed.
+
+        A POST whose outcome never resolved keeps its slot, because the
+        facilitator may be serving it. Once the body has expired and the
+        facilitator does not report the slot, it was never admitted and
+        nothing will ever settle it.
+        """
+        clock = {"t": 1_000.0}
+        monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+        fake = _FakeFacilitator(
+            [
+                requests.exceptions.ReadTimeout("slow"),
+                _response(200, _UPSTREAM_BODY),
+            ]
+        )
+        fake.info = self._info(on_chain=7, next_nonce=7, held=[])
+        _deadline_fires_after_the_post(fake, clock)
+        session = _session_with(fake, account=Account.create())()
+
+        with _patched(fake):
+            with pytest.raises(MechDeadlineExceededError):
+                session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+            assert slot_registry().live[self._KEY] == {7}
+
+            clock["t"] = 1_000.0
+            # Past the body's expiry on the facilitator's own clock, and it
+            # reports no rows, so it never admitted that request.
+            fake.info_headers["Date"] = "Wed, 01 Jan 2031 00:00:00 GMT"
+            # A different upstream call, so there is no replay to fall back on.
+            response = session.post(f"{_FACILITATOR}/v1beta/models/y", json={"p": 2})
+
+        assert response.status_code == 200
+        assert _posted_body(fake, 1)["nonce"] == "7", "stepped over a dead slot"
+
+    def test_an_idle_adapter_no_longer_pins_the_slot(self) -> None:
+        """Nothing here may make a facilitator call again for days.
+
+        Retirement on a requester-info read only happens when something
+        pays. A slot stranded by an adapter that then goes quiet would keep
+        the mech skill's on-chain path waiting the whole time, so anything
+        with a clock can retire one.
+        """
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        # Past the expiry and past the margin the registry keeps for a
+        # facilitator that may still be serving it.
+        freed = registry.retire_expired(
+            _CHAIN, _SAFE, now=1_000 + int(mech_module.FACILITATOR_WORST_CASE_SECS) + 1
+        )
+
+        assert freed == [7]
+        assert registry.live == {}
+
+    def test_retiring_leaves_the_facilitators_own_rows_alone(self) -> None:
+        """It admitted the request, so its next report is what retires it."""
+        registry = slot_registry()
+        registry.publish(_CHAIN, _SAFE, [7], now=1_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=10**9) == []
+        assert registry.live[self._KEY] == {7}
+
+    def test_retiring_keeps_a_request_that_can_still_be_admitted(self) -> None:
+        """Freeing it early is the collision the registry exists to stop."""
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 2_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=1_999) == []
+        assert registry.live[self._KEY] == {7}
+
+    def test_a_slot_only_just_expired_is_given_the_benefit_of_the_doubt(self) -> None:
+        """The facilitator can still be serving a request that has expired.
+
+        Its admission wait plus its upstream deadline outlast the request's
+        own TTL, and the slot only joins the reported set once a response or
+        a later read arrives, so acting the moment the clock passes the
+        expiry would free a slot in use.
+        """
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=1_010) == []
+        assert registry.live[self._KEY] == {7}
+
+    def test_a_facilitator_that_reports_only_a_count_keeps_the_old_behaviour(
+        self,
+    ) -> None:
+        """Handing a slot to one that cannot retire it would hold it forever.
+
+        ``_INFO_JSON`` carries no ``held_nonces``, so this is the path taken
+        against a facilitator that predates the field.
+        """
+        fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+        session = _session_with(fake)()
+
+        with _patched(fake):
+            assert session.get(f"{_FACILITATOR}/x").status_code == 200
+
+        # Still ours, so the chain counter prunes it once the delivery
+        # settles, which is all that can be done without the set.
+        assert slot_registry().live[self._KEY] == {_INFO_JSON["next_nonce"]}
+        assert (
+            reserve_slot(
+                _CHAIN, _SAFE, _INFO_JSON["next_nonce"] + 1, _INFO_JSON["next_nonce"] + 1
+            )
+            == _INFO_JSON["next_nonce"] + 1
+        )
+        assert slot_registry().live[self._KEY] == {_INFO_JSON["next_nonce"] + 1}
+
+
+def test_a_refused_slot_is_handed_straight_back() -> None:
+    """The marketplace consumes a requester's slots in order.
+
+    A slot kept after a refusal is one nothing will ever settle, and
+    every later request for the Safe queues behind it forever.
+    """
+    refusal = _json_response(
+        402,
+        {
+            "detail": {
+                "error": "insufficient_deposit",
+                "detail": "top up",
+                "context": {
+                    "balance": 1,
+                    "reserved": 0,
+                    "available": 1,
+                    "required": 10,
+                },
+            }
+        },
+    )
+    fake = _FakeFacilitator([refusal])
+    session = _session_with(fake)()
+
+    with _patched(fake):
+        with pytest.raises(MechDepositRequiredError):
+            session.get(f"{_FACILITATOR}/x")
+
+    assert slot_registry().live == {}
+
+
+def test_two_safes_do_not_share_a_slot_count() -> None:
+    """The marketplace counts slots per requester, not per process."""
+    other_safe = to_checksum_address("0x" + "ab" * 20)
+
+    assert reserve_slot(_CHAIN, _SAFE, 5, 5) == 5
+    assert reserve_slot(_CHAIN, other_safe, 5, 5) == 5
+    assert reserve_slot(_CHAIN, _SAFE, 5, 5) == 6
+
+    release_slot(_CHAIN, _SAFE, 5)
+    release_slot(_CHAIN, _SAFE, 6)
+    assert (_CHAIN.lower(), _SAFE.lower()) not in slot_registry().live
+    assert slot_registry().live[(_CHAIN.lower(), other_safe.lower())] == {5}
+
+
+def test_a_gap_left_by_a_release_is_filled_before_a_higher_slot() -> None:
+    """Skipping a freed slot would stall the Safe until something steps over it."""
+    assert reserve_slot(_CHAIN, _SAFE, 3, 3) == 3
+    assert reserve_slot(_CHAIN, _SAFE, 3, 3) == 4
+    assert reserve_slot(_CHAIN, _SAFE, 3, 3) == 5
+
+    release_slot(_CHAIN, _SAFE, 4)
+
+    assert reserve_slot(_CHAIN, _SAFE, 3, 3) == 4
 
 
 def _collision_response() -> Any:
@@ -733,6 +1143,46 @@ def test_unresolved_body_is_dropped_once_the_facilitator_refuses_it(
     assert _posted_body(fake, 1) == _posted_body(fake, 0)
     assert _posted_body(fake, 2)["nonce"] == str(_INFO_JSON["next_nonce"] + 1)
     assert _posted_body(fake, 2)["request_id"] != _posted_body(fake, 0)["request_id"]
+
+
+def test_a_slot_whose_body_the_facilitator_refuses_is_free_for_the_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused body was never served, so nothing is holding its slot.
+
+    The marketplace consumes a requester's slots in order, so one left
+    reserved with nothing to settle it is never reached by the chain
+    counter and every later call from the Safe signs above it and is
+    refused. The refusal here is not expiry, so the expired-body path
+    cannot be what frees it.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    not_found = _json_response(
+        404,
+        {"detail": {"error": "request_not_found", "detail": "no record", "context": {}}},
+    )
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            not_found,
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        # The facilitator never admitted it, so its first free slot has not moved.
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    # Signed at the same slot, not stepped over a slot nothing can settle.
+    assert _posted_body(fake, 2)["nonce"] == str(_INFO_JSON["next_nonce"])
+    key = (_CHAIN.lower(), _SAFE.lower())
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"]}
 
 
 def test_unresolved_body_still_in_progress_is_reported_not_resigned(
@@ -1221,8 +1671,8 @@ def test_a_body_still_awaiting_admission_is_replayed_not_re_signed(
     """The counter sits at the stored slot both before and during admission.
 
     A body queued for admission when the client walked away has not moved
-    the counter yet. Signing afresh creates a second request for the same
-    slot, and the original is still admitted, so the Safe pays twice.
+    the counter yet, and signing afresh gets the original admitted behind
+    it, so the Safe pays for two.
     """
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
@@ -1237,23 +1687,30 @@ def test_a_body_still_awaiting_admission_is_replayed_not_re_signed(
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
         clock["t"] = 1_000.0
         # A few seconds on the facilitator's clock, well inside the request
-        # TTL. A fresh signature would carry the later expiry; a replay cannot.
+        # TTL so the body is still admissible. A fresh signature would carry
+        # the later expiry; a replay cannot.
         fake.info_headers["Date"] = formatdate(time.time() + 5, usegmt=True)
-        first = _posted_body(fake, 0)
+        first_expiry = _posted_body(fake, 0)["expires_at"]
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    assert _posted_body(fake, 1) == first
-    assert _posted_body(fake, 1)["expires_at"] == first["expires_at"]
+    # The stored body, byte for byte, at the slot it was signed at. Signing
+    # afresh here creates a second request for a slot the facilitator may
+    # already be admitting the first one at.
+    assert _posted_body(fake, 1) == _posted_body(fake, 0)
+    assert _posted_body(fake, 1)["expires_at"] == first_expiry
+    assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
 
 
-def test_a_body_above_the_facilitators_next_slot_is_dropped_and_signed_afresh(
+def test_a_body_above_the_facilitators_next_slot_is_dropped_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Past the stored slot the body can never be admitted there.
+    """A slot the facilitator has not reached cannot have been admitted.
 
-    Replaying it would only be refused, so a fresh signature at the slot
-    the facilitator is actually expecting is the only thing that can land.
+    The registry hands out a slot above the facilitator's own when
+    something else holds the one below, and the facilitator refuses
+    anything above its next free slot. So such a body was never served,
+    and replaying it would only be refused again.
     """
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
@@ -1261,25 +1718,26 @@ def test_a_body_above_the_facilitators_next_slot_is_dropped_and_signed_afresh(
         [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
     )
     _deadline_fires_after_the_post(fake, clock)
-    above = _INFO_JSON["next_nonce"] + 1
-    # An agent that pays from this Safe by another route signs above the
-    # facilitator's own slot; that is how a stored body ends up there.
-    sources = iter([above, _INFO_JSON["next_nonce"]])
-    session = _session_with(fake, account=Account.create(),
-                            nonce_source=lambda _info: next(sources))()
+    session = _session_with(fake, account=Account.create())()
+    # Something else holds the facilitator's own next slot, so the call
+    # below signs the one above it.
+    held = reserve_slot(
+        _CHAIN, _SAFE, _INFO_JSON["next_nonce"], _INFO_JSON["on_chain_nonce"]
+    )
 
     with _patched(fake):
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
         clock["t"] = 1_000.0
+        release_slot(_CHAIN, _SAFE, held)
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    posts = [c for c in fake.calls if c["method"] == "POST"]
-    assert len(posts) == 2
-    assert _posted_body(fake, 0)["nonce"] == str(above)
-    # Dropped, not replayed: signed afresh at the slot the facilitator wants.
+    assert _posted_body(fake, 0)["nonce"] == str(_INFO_JSON["next_nonce"] + 1)
+    # Dropped rather than replayed: the second POST is a fresh signature at
+    # the slot the facilitator is actually expecting.
     assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
+    assert _posted_body(fake, 1) != _posted_body(fake, 0)
 
 
 def test_an_upstream_error_on_a_replay_is_returned_not_paid_for_again(
@@ -1326,24 +1784,173 @@ def test_the_deadline_error_names_the_slot_it_waited_on(
     assert "attempts" in message
 
 
-def test_every_retry_signs_at_the_injected_sources_slot(
+def test_every_retry_steps_over_a_slot_held_elsewhere_in_the_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent that pays from this Safe by more than one route owns the count.
+    """The facilitator's answer is a floor on every re-read, not just the first.
 
-    Taking the facilitator's answer on a retry drops back to a slot the
-    agent has already given to something else.
+    It accounts for its own unsettled rows and nothing else, so a retry
+    that signs at its answer drops onto a slot something else paying from
+    this Safe is already holding.
     """
     monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
     fake = _FakeFacilitator(
         [_collision_response(), _busy_response(), _response(200, _UPSTREAM_BODY)]
     )
-    # Every re-read reports a slot the agent must not drop back to.
-    fake.info_after_post = dict(_INFO_JSON, next_nonce=3)
-    session = _session_with(fake, nonce_source=lambda _info: 42)()
+    # The mech skill signed slot 3 and it has not settled, so the chain
+    # still reads 3 and so does the facilitator, which cannot see it.
+    fake.info = dict(_INFO_JSON, next_nonce=3, on_chain_nonce=3)
+    held = reserve_slot(_CHAIN, _SAFE, 3, 3)
+    session = _session_with(fake)()
 
     with _patched(fake):
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
-    assert [_posted_body(fake, i)["nonce"] for i in range(3)] == ["42", "42", "42"]
+    assert held == 3
+    # Every attempt steps over 3. Taking the facilitator's answer on a
+    # retry would sign 3 and put two requests on one slot.
+    assert [_posted_body(fake, i)["nonce"] for i in range(3)] == ["4", "4", "4"]
+
+
+def test_a_dropped_unadmitted_body_hands_its_slot_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing will ever settle a slot the facilitator never admitted.
+
+    The marketplace consumes a requester's slots in order, so keeping it
+    reserved would stall every later request for this Safe.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] = 1_000.0
+        # The counter has not moved, so the slot was never taken.
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    # The fresh signature takes the slot back rather than stepping over it.
+    assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
+
+
+def test_a_slot_that_never_clears_gives_up_before_the_call_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait holds this Safe's lock, so every other route queues behind it.
+
+    Waiting out the call's full deadline turns one blocked chat call into
+    a blocked CoinGecko call as well.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        mech_module.time, "sleep", lambda secs: clock.__setitem__("t", clock["t"] + secs)
+    )
+    fake = _FakeFacilitator([_collision_response()] * 200)
+    session = _session_with(
+        fake, total_deadline_secs=600.0, nonce_retry_budget_secs=20.0
+    )()
+
+    with _patched(fake), pytest.raises(MechSlotHeldElsewhereError) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    # Gave up on its own budget, with the call's deadline still far off.
+    assert clock["t"] - 1_000.0 < 30.0
+    assert "slot 7" in str(excinfo.value)
+    assert "expected 8" in str(excinfo.value)
+
+
+def test_a_slot_that_never_clears_still_leaves_the_safe_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot given up on must not stay reserved, or it stalls the Safe."""
+    monkeypatch.setattr(mech_module.time, "sleep", lambda _s: None)
+    fake = _FakeFacilitator([_collision_response()] * 200)
+    session = _session_with(
+        fake, total_deadline_secs=600.0, nonce_retry_budget_secs=0.0
+    )()
+
+    with _patched(fake), pytest.raises(MechSlotHeldElsewhereError):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert slot_registry().live == {}
+
+
+def test_a_slot_held_by_an_expired_unadmitted_body_is_handed_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise that slot blocks the Safe until the process restarts.
+
+    A POST whose outcome never resolved keeps its slot, since the
+    facilitator may still be serving it. If it was never admitted the
+    facilitator's first free slot stays there, so nothing settles and
+    nothing moves, and every later call is refused above it.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        key = (_CHAIN.lower(), _SAFE.lower())
+        assert slot_registry().live[key] == {_INFO_JSON["next_nonce"]}
+
+        clock["t"] = 1_000.0
+        # The facilitator's clock is now past the request's expiry, so it
+        # can never admit that body.
+        fake.info_headers["Date"] = "Wed, 01 Jan 2031 00:00:00 GMT"
+        # A different upstream call, so there is no replay to fall back on:
+        # the stored body belongs to the first one.
+        response = session.post(f"{_FACILITATOR}/v1beta/models/y", json={"p": 2})
+
+    assert response.status_code == 200
+    # Takes the stranded slot back rather than stepping over one that
+    # nothing will ever clear.
+    assert _posted_body(fake, 1)["nonce"] == str(_INFO_JSON["next_nonce"])
+    assert slot_registry().live[(_CHAIN.lower(), _SAFE.lower())] == {
+        _INFO_JSON["next_nonce"]
+    }
+
+
+def test_a_slot_the_facilitator_holds_survives_a_later_reserve() -> None:
+    """The facilitator's first free slot is not a settlement marker.
+
+    It sits above the facilitator's own unsettled rows, so pruning at that
+    number forgets slots it is still holding. The next caller flooring at
+    the on-chain counter is then handed one of them straight back, which
+    is the collision the registry exists to prevent.
+    """
+    registry = slot_registry()
+
+    # Two facilitator calls: the chain has not moved, so both are unsettled.
+    first = registry.reserve(_CHAIN, _SAFE, 5, 5)
+    second = registry.reserve(_CHAIN, _SAFE, 6, 5)
+    # The mech skill floors at mapNonces, which is still 5.
+    mech = registry.reserve(_CHAIN, _SAFE, 5, 5)
+
+    assert (first, second) == (5, 6)
+    assert mech == 7, "the mech skill was handed a slot the facilitator holds"
+
+
+def test_settlement_is_what_lets_a_slot_be_forgotten() -> None:
+    """Without pruning on the settled counter the set would grow forever."""
+    registry = slot_registry()
+    registry.reserve(_CHAIN, _SAFE, 5, 5)
+    registry.reserve(_CHAIN, _SAFE, 6, 5)
+
+    # Both settled: the chain counter is now past them.
+    assert registry.reserve(_CHAIN, _SAFE, 7, 7) == 7
+    assert registry.live[(_CHAIN.lower(), _SAFE.lower())] == {7}
