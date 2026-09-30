@@ -42,7 +42,6 @@ class HttpxHooks:
         retry_timeout: HttpxTimeout = DEFAULT_X402_HTTPX_TIMEOUT,
     ):
         self.client = client
-        self._is_retry = False
         self._retry_timeout = _coerce_httpx_timeout(retry_timeout)
 
     async def on_request(self, request: Request):
@@ -56,11 +55,8 @@ class HttpxHooks:
         if response.status_code != 402:
             return response
 
-        # If this is a retry response, just return it
-        if self._is_retry:
-            return response
-
-        self._is_retry = True
+        # The paid retry below goes out on a client carrying no hooks, so a
+        # 402 seen here is always an unpaid first attempt.
         try:
             if not response.request:
                 raise MissingRequestConfigError("Missing request configuration")
@@ -107,8 +103,6 @@ class HttpxHooks:
             raise
         except Exception as e:
             raise PaymentError(f"Failed to handle payment: {str(e)}") from e
-        finally:
-            self._is_retry = False
 
 
 def x402_payment_hooks(
