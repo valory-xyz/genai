@@ -11,7 +11,7 @@ fingerprint:
   clients/__init__.py: bafybeihbhgodkioxwnls4ek7pwed4gwwdt5kdhpbje66wsapx2nyl2ueg4
   clients/base.py: bafybeihazsubdsblliw7yb7hkitfwc5eazvczy6wvajbifmmhlw434cbje
   clients/httpx.py: bafybeifjx4puybfjfzhdbyimob6hx3bsmb63zjj34gq4c6f26fhb6qn4xe
-  clients/mech.py: bafybeiezken24jkwod4m33av5zgmxbqpbf4w3oddxxaog2g6cejhx2kn3q
+  clients/mech.py: bafybeiejirnm3rtk2dtyvmi2y3tvsa3ntme632i2lw5vk23phwo33bnswy
   clients/requests.py: bafybeihwtkbr6nezurvxcetsti5fehqw6ivvtq4toyhskqc3ndsk2kvmae
   common.py: bafybeig5ejditvk6gkvclyuxqouevvkw4ykktd6hcvpcfeqs7w7ienbyba
   connection.py: bafybeidedjkocavsdakhjaykov42onaeosidub6hbyluimp4re4oc72ncy
