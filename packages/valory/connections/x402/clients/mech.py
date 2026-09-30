@@ -243,22 +243,35 @@ class SlotRegistry:
         return freed
 
     def retire_expired(
-        self, chain: str, safe_address: str, now: int
+        self,
+        chain: str,
+        safe_address: str,
+        now: int,
+        margin_secs: float = FACILITATOR_WORST_CASE_SECS,
     ) -> List[int]:
         """Free slots whose signed request can no longer be admitted.
 
         :param chain: facilitator chain slug.
         :param safe_address: the Safe that pays for the call.
         :param now: the clock to judge expiry against.
+        :param margin_secs: how far past the expiry to wait before acting.
         :return: the slots freed.
 
         For a caller with no facilitator of its own to ask. Slots the
         facilitator reports are left alone, so this is safe to run from
         anything in the process that can see a clock.
+
+        The margin is applied here rather than left to the caller, and
+        defaults to the facilitator's own worst case. A request can expire
+        while the facilitator is still serving it, since admission plus the
+        upstream deadline can outlast the request's TTL, and the slot only
+        joins the reported set when a response or a later read arrives. A
+        caller passing its own unadjusted clock would free a slot being
+        served, which is the collision the registry exists to prevent.
         """
         key = (chain.lower(), safe_address.lower())
         with self._guard:
-            return self._retire_expired_locked(key, int(now))
+            return self._retire_expired_locked(key, int(now - margin_secs))
 
     def hand_over(self, chain: str, safe_address: str, slot: int) -> None:
         """Record that the facilitator has taken responsibility for ``slot``.
