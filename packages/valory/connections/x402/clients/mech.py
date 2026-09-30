@@ -744,11 +744,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :return: the stored response, or ``None`` when a fresh request must be signed.
 
         Replayed while the facilitator's first free slot is still at or
-        above the one the body carries. At it, the body may be waiting for
+        above the one the body carries. At it, the body may be queued for
         admission, and signing afresh would have the original admitted
-        later and pay for both. Above it, the slot is gone and so is any
-        chance this body is still live, so a fresh one is signed rather
-        than sending it at a slot that has moved on.
+        behind the retry and pay for both. Above it the slot is spent, so
+        the body can never be admitted there and a fresh one is signed.
         """
         pending = self._take_unresolved(call_key)
         if pending is None:
@@ -757,7 +756,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         if nonce > int(info.next_nonce):
             _logger.info(
                 "mech call has an unresolved request at slot %s, which the "
-                "facilitator has moved past without admitting; signing afresh",
+                "facilitator has moved past; signing afresh",
                 nonce,
             )
             # Nothing will ever settle it, and the marketplace consumes a
