@@ -787,7 +787,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             raise MechRequestRejectedError(
                 status_code=response.status_code, error=parsed[0], detail=parsed[1]
             )
-        # Refused (expired, stale nonce, ...): it was never served, sign afresh.
+        # Refused: it was never served, so nothing holds the slot. The
+        # marketplace consumes a requester's slots in order, so a slot left
+        # reserved with nothing to settle it stalls every later call.
+        self._release(nonce)
         return None
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:  # type: ignore[override]

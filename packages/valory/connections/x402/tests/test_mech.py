@@ -829,6 +829,46 @@ def test_unresolved_body_is_dropped_once_the_facilitator_refuses_it(
     assert _posted_body(fake, 2)["request_id"] != _posted_body(fake, 0)["request_id"]
 
 
+def test_a_slot_whose_body_the_facilitator_refuses_is_free_for_the_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused body was never served, so nothing is holding its slot.
+
+    The marketplace consumes a requester's slots in order, so one left
+    reserved with nothing to settle it is never reached by the chain
+    counter and every later call from the Safe signs above it and is
+    refused. The refusal here is not expiry, so the expired-body path
+    cannot be what frees it.
+    """
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    not_found = _json_response(
+        404,
+        {"detail": {"error": "request_not_found", "detail": "no record", "context": {}}},
+    )
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            not_found,
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _session_with(fake, account=Account.create())()
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        # The facilitator never admitted it, so its first free slot has not moved.
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    # Signed at the same slot, not stepped over a slot nothing can settle.
+    assert _posted_body(fake, 2)["nonce"] == str(_INFO_JSON["next_nonce"])
+    key = (_CHAIN.lower(), _SAFE.lower())
+    assert slot_registry().live[key] == {_INFO_JSON["next_nonce"]}
+
+
 def test_unresolved_body_still_in_progress_is_reported_not_resigned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
