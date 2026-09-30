@@ -690,7 +690,11 @@ class TestTheFacilitatorOwnsTheSlotsItReports:
         taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
         registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
 
-        freed = registry.retire_expired(_CHAIN, _SAFE, now=1_001)
+        # Past the expiry and past the margin the registry keeps for a
+        # facilitator that may still be serving it.
+        freed = registry.retire_expired(
+            _CHAIN, _SAFE, now=1_000 + int(mech_module.FACILITATOR_WORST_CASE_SECS) + 1
+        )
 
         assert freed == [7]
         assert registry.live == {}
@@ -710,6 +714,21 @@ class TestTheFacilitatorOwnsTheSlotsItReports:
         registry.note_expiry(_CHAIN, _SAFE, taken, 2_000)
 
         assert registry.retire_expired(_CHAIN, _SAFE, now=1_999) == []
+        assert registry.live[self._KEY] == {7}
+
+    def test_a_slot_only_just_expired_is_given_the_benefit_of_the_doubt(self) -> None:
+        """The facilitator can still be serving a request that has expired.
+
+        Its admission wait plus its upstream deadline outlast the request's
+        own TTL, and the slot only joins the reported set once a response or
+        a later read arrives, so acting the moment the clock passes the
+        expiry would free a slot in use.
+        """
+        registry = slot_registry()
+        taken = reserve_slot(_CHAIN, _SAFE, 7, 7)
+        registry.note_expiry(_CHAIN, _SAFE, taken, 1_000)
+
+        assert registry.retire_expired(_CHAIN, _SAFE, now=1_010) == []
         assert registry.live[self._KEY] == {7}
 
     def test_a_facilitator_that_reports_only_a_count_keeps_the_old_behaviour(
