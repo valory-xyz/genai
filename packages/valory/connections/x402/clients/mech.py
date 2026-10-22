@@ -96,9 +96,12 @@ DEFAULT_MIN_CALL_BUDGET_SECS = 30.0
 # and marked on the wire with ``nonce_mode``. One nonce per request, so two
 # routes paying from the same Safe never share a counter value and need no
 # slot bookkeeping.
+# Explicit requests settle on their own mech, named by the facilitator's
+# ``explicit_mech_address``, which the request id commits to.
 # ``sequential``: the Safe's ``mapNonces`` counter, taken through the slot
 # registry below, which is what the facilitator settles in order. Used when
-# asked for, and when the facilitator turns an explicit request away.
+# asked for, for a call whose requester info names no explicit mech, and
+# when the facilitator turns an explicit request away.
 NonceMode = Literal["explicit", "sequential"]
 NONCE_MODE_EXPLICIT: NonceMode = "explicit"
 NONCE_MODE_SEQUENTIAL: NonceMode = "sequential"
@@ -514,6 +517,10 @@ class RequesterInfo:
     # Facilitator clock (unix seconds) from the response's Date header, so
     # expires_at is not hostage to the agent's clock; None when absent.
     server_time: Optional[int] = None
+    # The mech that settles explicit-nonce requests, a different contract
+    # from ``mech_address``. None while the facilitator takes none on this
+    # chain, so the call goes sequential without trying.
+    explicit_mech_address: Optional[str] = None
 
     @classmethod
     def from_json(
@@ -541,6 +548,11 @@ class RequesterInfo:
             held_nonces=(
                 tuple(int(slot) for slot in data["held_nonces"])
                 if data.get("held_nonces") is not None
+                else None
+            ),
+            explicit_mech_address=(
+                str(data["explicit_mech_address"])
+                if data.get("explicit_mech_address")
                 else None
             ),
         )
@@ -836,9 +848,11 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param call: the upstream call, as forwarded.
         :param info: the facilitator's requester info.
         :param nonce: the slot (sequential) or the chosen nonce (explicit).
-        :param settle_by: the settlement deadline of an explicit request;
-            ``None`` signs the sequential id.
+        :param settle_by: the settlement deadline of an explicit request,
+            signed for ``info.explicit_mech_address``; ``None`` signs the
+            sequential id for ``info.mech_address``.
         :return: the JSON body to post.
+        :raises ValueError: when asked for an explicit id with no explicit mech.
         """
         rate = info.delivery_rates.get(self.api)
         if rate is None:
@@ -875,11 +889,13 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                 self.chain, self.safe_address, nonce, expires_at
             )
         else:
+            if info.explicit_mech_address is None:
+                raise ValueError("an explicit request needs an explicit mech")
             request_id = derive_explicit_request_id(
                 domain_separator=compute_explicit_nonce_domain_separator(
                     info.chain_id, info.marketplace_address
                 ),
-                mech_address=info.mech_address,
+                mech_address=info.explicit_mech_address,
                 requester=self.safe_address,
                 data=data,
                 max_delivery_rate=rate,
@@ -1202,7 +1218,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param deadline: monotonic instant after which the call gives up.
         :param kwargs: adapter send arguments.
         :return: the facilitator's response, or ``None`` when it does not
-            accept explicit nonces and the call has to go sequential.
+            accept explicit nonces (it refuses them, or a fresh info read
+            names no explicit mech) and the call has to go sequential.
         :raises MechDepositRequiredError: when the pre-deposit is too low.
         :raises MechRequestRejectedError: on any other refusal.
 
@@ -1212,6 +1229,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_budget: Optional[float] = None
         while True:
+            if info.explicit_mech_address is None:
+                return None
             now = info.server_time if info.server_time is not None else int(time.time())
             body = self._signed_body(
                 call,
@@ -1274,7 +1293,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
             return resumed
-        if self.nonce_mode == NONCE_MODE_EXPLICIT:
+        if self.nonce_mode == NONCE_MODE_EXPLICIT and info.explicit_mech_address:
             explicit = self._send_explicit(call, call_key, info, deadline, **kwargs)
             if explicit is not None:
                 return explicit
