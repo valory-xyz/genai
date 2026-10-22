@@ -27,12 +27,24 @@ call into a Safe-signed marketplace request on ``/mech/{api}/{chain}``.
 import base64
 import json
 import logging
+import secrets
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+    get_args,
+)
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
@@ -42,7 +54,9 @@ from requests.adapters import HTTPAdapter
 from packages.valory.connections.x402.clients.base import PaymentError
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
+    compute_explicit_nonce_domain_separator,
     compute_safe_message_hash,
+    derive_explicit_request_id,
     derive_request_id,
 )
 
@@ -76,6 +90,34 @@ DEFAULT_TOTAL_DEADLINE_SECS = 300.0
 # off while the facilitator serves it, which is charged. Refuse instead.
 # Must stay below ``total_deadline_secs`` or every call gives up.
 DEFAULT_MIN_CALL_BUDGET_SECS = 30.0
+# How a request's nonce is chosen.
+# ``explicit`` (the default): a random nonce per request and a settlement
+# deadline, signed as the marketplace's ``getRequestIdWithNonce`` typed data
+# and marked on the wire with ``nonce_mode``. One nonce per request, so two
+# routes paying from the same Safe never share a counter value and need no
+# slot bookkeeping.
+# ``sequential``: the Safe's ``mapNonces`` counter, taken through the slot
+# registry below, which is what the facilitator settles in order. Used when
+# asked for, and when the facilitator turns an explicit request away.
+NonceMode = Literal["explicit", "sequential"]
+NONCE_MODE_EXPLICIT: NonceMode = "explicit"
+NONCE_MODE_SEQUENTIAL: NonceMode = "sequential"
+# How long past the facilitator's clock an explicit request stays settleable.
+EXPLICIT_NONCE_DEADLINE_SECS = 15 * 60
+# Width of a requester-chosen nonce. The marketplace requires it to be
+# unique per requester; at this width collisions are not a concern.
+EXPLICIT_NONCE_BITS = 256
+# What a receiving side without the explicit-nonce path answers an explicit
+# request with, by status. A mech with the path switched off sends 503 with
+# this reason (the refusal mech-client falls back on). A facilitator that
+# predates ``nonce_mode`` ignores it, re-derives the sequential id and sends
+# 400 with the mismatch detail. Only these exact refusals fall back; any
+# other is the caller's error.
+EXPLICIT_NONCE_DISABLED_REASON = "explicit-nonce requests are not enabled on this mech"
+_EXPLICIT_REFUSALS: Dict[int, str] = {
+    503: EXPLICIT_NONCE_DISABLED_REASON,
+    400: "request_id does not match the derived value for this body",
+}
 # Replayable bodies kept per adapter, and how long one is kept before it
 # is evicted to bound the store.
 _UNRESOLVED_MAX = 32
@@ -585,6 +627,37 @@ def _facilitator_error(response: requests.Response) -> Optional[Tuple[str, str, 
     return ("error", str(detail), {})
 
 
+def _explicit_nonce_refused(response: requests.Response) -> bool:
+    """Whether ``response`` turns an explicit request away for its nonce mode.
+
+    :param response: the answer to an explicit request.
+    :return: True when the request should be resent with a sequential nonce.
+    """
+    expected = _EXPLICIT_REFUSALS.get(response.status_code)
+    if expected is None:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        detail = detail.get("detail")
+    return expected in (detail, body.get("reason"))
+
+
+def _deposit_error(context: Dict[str, Any]) -> MechDepositRequiredError:
+    """Build the typed 402 error from the facilitator's context."""
+    return MechDepositRequiredError(
+        balance=int(context.get("balance", 0)),
+        reserved=int(context.get("reserved", 0)),
+        available=int(context.get("available", 0)),
+        required=int(context.get("required", 0)),
+    )
+
+
 class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attributes
     """HTTP adapter that rewrites requests into signed mech-marketplace calls."""
 
@@ -603,6 +676,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         min_call_budget_secs: float = DEFAULT_MIN_CALL_BUDGET_SECS,
         default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
         total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
+        nonce_mode: NonceMode = NONCE_MODE_EXPLICIT,
+        explicit_nonce_deadline_secs: int = EXPLICIT_NONCE_DEADLINE_SECS,
         **kwargs: Any,
     ) -> None:
         """Initialise the adapter.
@@ -622,10 +697,22 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param min_call_budget_secs: refuse to sign with less than this left.
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
+        :param nonce_mode: ``explicit`` or ``sequential``, see ``NonceMode``.
+            An adapter whose explicit request is refused stays sequential.
+        :param explicit_nonce_deadline_secs: how long an explicit request
+            stays settleable, from the facilitator's clock.
         :param kwargs: passed to ``HTTPAdapter``.
-        :raises ValueError: when the budget floor is not below the deadline.
+        :raises ValueError: when the budget floor is not below the deadline,
+            or the nonce mode is unknown.
         """
+        if nonce_mode not in get_args(NonceMode):
+            raise ValueError(
+                f"unknown nonce_mode {nonce_mode!r}; expected one of "
+                f"{get_args(NonceMode)}"
+            )
         super().__init__(**kwargs)
+        self.nonce_mode: NonceMode = nonce_mode
+        self.explicit_nonce_deadline_secs = explicit_nonce_deadline_secs
         self.total_deadline_secs = total_deadline_secs
         self.account = account
         self.safe_address = safe_address
@@ -646,7 +733,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         self._default_timeout = default_timeout
         # Signed POSTs whose outcome is unknown, one entry per upstream call
         # so a second call does not discard the first one's replay.
-        self._unresolved: "OrderedDict[str, Tuple[requests.PreparedRequest, int, float]]" = (
+        # The slot is ``None`` for an explicit body, which holds none.
+        self._unresolved: "OrderedDict[str, Tuple[requests.PreparedRequest, Optional[int], float]]" = (
             OrderedDict()
         )
         # One call at a time per Safe; see ``_safe_lock``.
@@ -737,8 +825,21 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         )
 
     def _signed_body(
-        self, call: Dict[str, Any], info: RequesterInfo, nonce: int
+        self,
+        call: Dict[str, Any],
+        info: RequesterInfo,
+        nonce: int,
+        settle_by: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Sign one request at ``nonce``.
+
+        :param call: the upstream call, as forwarded.
+        :param info: the facilitator's requester info.
+        :param nonce: the slot (sequential) or the chosen nonce (explicit).
+        :param settle_by: the settlement deadline of an explicit request;
+            ``None`` signs the sequential id.
+        :return: the JSON body to post.
+        """
         rate = info.delivery_rates.get(self.api)
         if rate is None:
             raise MechRequestRejectedError(
@@ -759,22 +860,36 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             body_b64=call["body_b64"],
             expires_at=expires_at,
         )
-        request_id = derive_request_id(
-            marketplace_address=info.marketplace_address,
-            mech_address=info.mech_address,
-            requester=self.safe_address,
-            data=data,
-            delivery_rate=rate,
-            payment_type=info.payment_type,
-            nonce=nonce,
-            chain_id=info.chain_id,
-        )
+        if settle_by is None:
+            request_id = derive_request_id(
+                marketplace_address=info.marketplace_address,
+                mech_address=info.mech_address,
+                requester=self.safe_address,
+                data=data,
+                delivery_rate=rate,
+                payment_type=info.payment_type,
+                nonce=nonce,
+                chain_id=info.chain_id,
+            )
+            slot_registry().note_expiry(
+                self.chain, self.safe_address, nonce, expires_at
+            )
+        else:
+            request_id = derive_explicit_request_id(
+                domain_separator=compute_explicit_nonce_domain_separator(
+                    info.chain_id, info.marketplace_address
+                ),
+                mech_address=info.mech_address,
+                requester=self.safe_address,
+                data=data,
+                max_delivery_rate=rate,
+                payment_type=info.payment_type,
+                nonce=nonce,
+                deadline=settle_by,
+            )
         digest = compute_safe_message_hash(request_id, self.safe_address, info.chain_id)
         signed = self.account.unsafe_sign_hash(digest)
-        slot_registry().note_expiry(
-            self.chain, self.safe_address, nonce, expires_at
-        )
-        return {
+        body: Dict[str, Any] = {
             "request_id": "0x" + request_id.hex(),
             "safe_address": self.safe_address,
             "signature": "0x" + bytes(signed.signature).hex(),
@@ -782,6 +897,10 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             "expires_at": expires_at,
             "upstream": call,
         }
+        if settle_by is not None:
+            body["nonce_mode"] = NONCE_MODE_EXPLICIT
+            body["deadline"] = settle_by
+        return body
 
     def _post_signed(
         self, prepared: requests.PreparedRequest, deadline: float, **kwargs: Any
@@ -841,14 +960,15 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             ) from exc
 
     def _remember_unresolved(
-        self, call_key: str, prepared: requests.PreparedRequest, nonce: int
+        self, call_key: str, prepared: requests.PreparedRequest, nonce: Optional[int]
     ) -> None:
         """Keep ``prepared`` replayable for ``call_key`` until it expires.
 
         :param call_key: canonical form of the upstream call being sent.
         :param prepared: the signed POST whose outcome is unknown.
         :param nonce: the slot it was signed at, so a later call can tell
-            whether the facilitator ever admitted it.
+            whether the facilitator ever admitted it; ``None`` for an
+            explicit body, which holds no slot.
         """
         now = time.monotonic()
         self._unresolved[call_key] = (prepared, nonce, now + _UNRESOLVED_TTL_SECS)
@@ -860,7 +980,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
 
     def _take_unresolved(
         self, call_key: str
-    ) -> Optional[Tuple[requests.PreparedRequest, int]]:
+    ) -> Optional[Tuple[requests.PreparedRequest, Optional[int]]]:
         """Remove and return the replayable body for ``call_key`` and its slot.
 
         :param call_key: canonical form of the upstream call being sent.
@@ -894,7 +1014,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             return
         now = info.server_time if info.server_time is not None else int(time.time())
         for call_key, (prepared, nonce, _ttl) in list(self._unresolved.items()):
-            if nonce != int(info.next_nonce):
+            if nonce is None or nonce != int(info.next_nonce):
                 continue
             try:
                 expires_at = int(json.loads(prepared.body or b"{}")["expires_at"])
@@ -928,13 +1048,14 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         and pay for both; below it the slot is already spent, so the body
         was admitted and its outcome is the thing worth asking for. Above
         it the facilitator has not reached that slot and never will while
-        the gap stands, so the body is dead and a fresh one is signed.
+        the gap stands, so the body is dead and a fresh one is signed. An
+        explicit body holds no slot and is always replayed.
         """
         pending = self._take_unresolved(call_key)
         if pending is None:
             return None
         prepared, nonce = pending
-        if nonce > int(info.next_nonce):
+        if nonce is not None and nonce > int(info.next_nonce):
             _logger.info(
                 "mech call has an unresolved request at slot %s, above the "
                 "facilitator's first free slot, which it will never reach; "
@@ -956,6 +1077,9 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             # replayable; losing it here is what makes the next call pay twice.
             self._remember_unresolved(call_key, prepared, nonce)
             raise
+        if nonce is None and _explicit_nonce_refused(response):
+            # Never served; the fresh request decides whether to go sequential.
+            return None
         if 200 <= response.status_code < 300:
             self._hand_over(nonce, info)
             return response
@@ -1017,11 +1141,14 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             int(info.on_chain_nonce),
         )
 
-    def _release(self, nonce: int) -> None:
+    def _release(self, nonce: Optional[int]) -> None:
         """Hand back a slot the facilitator refused before serving it.
 
-        :param nonce: the slot reserved earlier.
+        :param nonce: the slot reserved earlier; ``None`` (an explicit
+            request, which holds no slot) is a no-op.
         """
+        if nonce is None:
+            return
         release_slot(self.chain, self.safe_address, nonce)
 
     def _publish(self, info: "RequesterInfo") -> None:
@@ -1042,10 +1169,11 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
             now=info.server_time,
         )
 
-    def _hand_over(self, nonce: int, info: "RequesterInfo") -> None:
+    def _hand_over(self, nonce: Optional[int], info: "RequesterInfo") -> None:
         """Give a slot the facilitator has acknowledged over to it.
 
-        :param nonce: the slot it accepted.
+        :param nonce: the slot it accepted; ``None`` (an explicit request,
+            which holds no slot) is a no-op.
         :param info: the facilitator's requester info for this call.
 
         Only against a facilitator that reports the slots it holds, since
@@ -1054,9 +1182,77 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         the process, which is worse than keeping it ourselves: at least the
         chain counter prunes ours once the delivery settles.
         """
-        if info.held_nonces is None:
+        if nonce is None or info.held_nonces is None:
             return
         slot_registry().hand_over(self.chain, self.safe_address, nonce)
+
+    def _send_explicit(
+        self,
+        call: Dict[str, Any],
+        call_key: str,
+        info: RequesterInfo,
+        deadline: float,
+        **kwargs: Any,
+    ) -> Optional[requests.Response]:
+        """Run one call with an explicit nonce; the caller holds the per-Safe lock.
+
+        :param call: the upstream call, as forwarded.
+        :param call_key: canonical form of ``call``.
+        :param info: the facilitator's requester info.
+        :param deadline: monotonic instant after which the call gives up.
+        :param kwargs: adapter send arguments.
+        :return: the facilitator's response, or ``None`` when it does not
+            accept explicit nonces and the call has to go sequential.
+        :raises MechDepositRequiredError: when the pre-deposit is too low.
+        :raises MechRequestRejectedError: on any other refusal.
+
+        Nothing here touches the slot registry: the request holds no slot,
+        so there is nothing to reserve, hand over or give back.
+        """
+        url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
+        busy_budget: Optional[float] = None
+        while True:
+            now = info.server_time if info.server_time is not None else int(time.time())
+            body = self._signed_body(
+                call,
+                info,
+                secrets.randbits(EXPLICIT_NONCE_BITS),
+                settle_by=now + int(self.explicit_nonce_deadline_secs),
+            )
+            prepared = requests.Request(
+                "POST",
+                url,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(body),
+            ).prepare()
+            self._check_budget(deadline)
+            self._remember_unresolved(call_key, prepared, None)
+            response = self._post_signed(prepared, deadline, **kwargs)
+            if _explicit_nonce_refused(response):
+                self._take_unresolved(call_key)
+                return None
+            parsed = _facilitator_error(response)
+            if 200 <= response.status_code < 300 or parsed is None:
+                self._take_unresolved(call_key)
+                return response
+            error, detail, context = parsed
+            if error != _IN_PROGRESS:
+                self._take_unresolved(call_key)
+            if response.status_code == 402:
+                raise _deposit_error(context)
+            if response.status_code == 409 and error == _BUSY:
+                if busy_budget is None:
+                    busy_budget = _wait_budget_secs(response, DEFAULT_BUSY_RETRIES)
+                wait = _retry_after_secs(response)
+                if wait <= busy_budget:
+                    busy_budget -= wait
+                    self._wait(deadline, wait)
+                    info = self._fetch_info(deadline, **kwargs)
+                    self._publish(info)
+                    continue
+            raise MechRequestRejectedError(
+                status_code=response.status_code, error=error, detail=detail
+            )
 
     def _send_locked(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self, request: requests.PreparedRequest, deadline: float, **kwargs: Any
@@ -1078,6 +1274,15 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
             return resumed
+        if self.nonce_mode == NONCE_MODE_EXPLICIT:
+            explicit = self._send_explicit(call, call_key, info, deadline, **kwargs)
+            if explicit is not None:
+                return explicit
+            _logger.warning(
+                "mech facilitator does not accept explicit nonces; resending "
+                "with the Safe's sequential nonce, and staying sequential"
+            )
+            self.nonce_mode = NONCE_MODE_SEQUENTIAL
         nonce = self._reserve(info)
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_budget: Optional[float] = None
@@ -1130,12 +1335,7 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
                     self._take_unresolved(call_key)
                     consumed = False
                 if response.status_code == 402:
-                    raise MechDepositRequiredError(
-                        balance=int(context.get("balance", 0)),
-                        reserved=int(context.get("reserved", 0)),
-                        available=int(context.get("available", 0)),
-                        required=int(context.get("required", 0)),
-                    )
+                    raise _deposit_error(context)
                 if response.status_code == 409 and error == _BUSY:
                     # Another call from this Safe is in flight; when it is done
                     # the next nonce may have moved, so re-read it.
@@ -1209,6 +1409,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
     ttl_secs: int = DEFAULT_REQUEST_TTL_SECS,
     default_timeout: Union[float, Tuple[float, float]] = DEFAULT_MECH_TIMEOUT,
     total_deadline_secs: float = DEFAULT_TOTAL_DEADLINE_SECS,
+    nonce_mode: NonceMode = NONCE_MODE_EXPLICIT,
     **kwargs: Any,
 ) -> requests.Session:
     """Create a requests session that pays for calls through the mech marketplace.
@@ -1226,6 +1427,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
     :param ttl_secs: how long a signed request stays valid.
     :param default_timeout: timeout applied when the caller passes none.
     :param total_deadline_secs: wall-clock cap on one call, everything included.
+    :param nonce_mode: ``explicit`` or ``sequential``, see ``NonceMode``.
     :param kwargs: passed to ``HTTPAdapter``.
     :return: a session with the mech adapter mounted for http and https.
     """
@@ -1240,6 +1442,7 @@ def mech_requests(  # pylint: disable=too-many-arguments
         ttl_secs=ttl_secs,
         default_timeout=default_timeout,
         total_deadline_secs=total_deadline_secs,
+        nonce_mode=nonce_mode,
         **kwargs,
     )
     session.mount("http://", adapter)

@@ -17,7 +17,7 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Byte-exact mirrors of the facilitator's canonical bytes, ``MechMarketplace.getRequestId`` and the Safe message wrap.
+"""Byte-exact mirrors of the facilitator's canonical bytes, the marketplace request ids and the Safe message wrap.
 
 Change them only together with their counterparts (x402-poc
 ``mech_facilitator/canonical.py`` and ``request_id.py``, the
@@ -36,6 +36,16 @@ _DOMAIN_TYPEHASH = keccak(
     text=(
         "EIP712Domain(string name,string version,uint256 chainId,"
         "address verifyingContract)"
+    )
+)
+# The explicit-nonce path signs standard EIP-712 typed data under the
+# marketplace's second domain (``getDomainSeparatorWithNonce``), so an id
+# from one path never verifies on the other.
+_EXPLICIT_NONCE_VERSION = "2"
+_EXPLICIT_NONCE_TYPEHASH = keccak(
+    text=(
+        "ExplicitNonceDelivery(address mech,address requester,bytes data,"
+        "uint256 maxDeliveryRate,bytes32 paymentType,uint256 nonce,uint256 deadline)"
     )
 )
 _SAFE_DOMAIN_TYPEHASH = keccak(
@@ -142,6 +152,87 @@ def derive_request_id(  # pylint: disable=too-many-arguments
         )
     )
     return keccak(b"\x19\x01" + domain_separator + inner_hash)
+
+
+def compute_explicit_nonce_domain_separator(
+    chain_id: int, marketplace_address: str
+) -> bytes:
+    """Reproduce ``MechMarketplace.getDomainSeparatorWithNonce``.
+
+    Unlike the sequential domain, the version is hashed as raw bytes, as
+    plain EIP-712 does.
+
+    :param chain_id: the settlement chain id.
+    :param marketplace_address: the marketplace contract address.
+    :return: the 32-byte domain separator.
+    """
+    return keccak(
+        abi_encode(
+            ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+            [
+                _DOMAIN_TYPEHASH,
+                keccak(text=_MARKETPLACE_NAME),
+                keccak(text=_EXPLICIT_NONCE_VERSION),
+                chain_id,
+                marketplace_address,
+            ],
+        )
+    )
+
+
+def derive_explicit_request_id(  # pylint: disable=too-many-arguments
+    *,
+    domain_separator: bytes,
+    mech_address: str,
+    requester: str,
+    data: bytes,
+    max_delivery_rate: int,
+    payment_type: bytes,
+    nonce: int,
+    deadline: int,
+) -> bytes:
+    """Local mirror of ``MechMarketplace.getRequestIdWithNonce``.
+
+    :param domain_separator: from ``compute_explicit_nonce_domain_separator``;
+        the marketplace address and chain enter only through it.
+    :param mech_address: the mech contract the request targets.
+    :param requester: the Safe that pays the delivery rate.
+    :param data: the bytes committed on-chain as ``requestData``.
+    :param max_delivery_rate: the per-request cap being signed.
+    :param payment_type: 32-byte ``paymentType`` constant of the mech.
+    :param nonce: the requester-chosen nonce for this request.
+    :param deadline: last unix timestamp at which the request settles.
+    :return: the 32-byte request_id the contract computes at settlement.
+    """
+    if len(domain_separator) != 32:
+        raise ValueError("domain_separator must be 32 bytes")
+    if len(payment_type) != 32:
+        raise ValueError("payment_type must be 32 bytes")
+    struct_hash = keccak(
+        abi_encode(
+            [
+                "bytes32",
+                "address",
+                "address",
+                "bytes32",
+                "uint256",
+                "bytes32",
+                "uint256",
+                "uint256",
+            ],
+            [
+                _EXPLICIT_NONCE_TYPEHASH,
+                mech_address,
+                requester,
+                keccak(data),
+                max_delivery_rate,
+                payment_type,
+                nonce,
+                deadline,
+            ],
+        )
+    )
+    return keccak(b"\x19\x01" + domain_separator + struct_hash)
 
 
 def compute_safe_message_hash(
