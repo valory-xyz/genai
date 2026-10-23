@@ -98,12 +98,18 @@ DEFAULT_MIN_CALL_BUDGET_SECS = 30.0
 # slot bookkeeping.
 # ``sequential``: the Safe's ``mapNonces`` counter, taken through the slot
 # registry below, which is what the facilitator settles in order. Used when
-# asked for, and when the facilitator turns an explicit request away.
+# asked for, and for a while after the facilitator turns an explicit request
+# away (see ``EXPLICIT_NONCE_RETRY_AFTER_SECS``).
 NonceMode = Literal["explicit", "sequential"]
 NONCE_MODE_EXPLICIT: NonceMode = "explicit"
 NONCE_MODE_SEQUENTIAL: NonceMode = "sequential"
 # How long past the facilitator's clock an explicit request stays settleable.
 EXPLICIT_NONCE_DEADLINE_SECS = 15 * 60
+# How long a facilitator's refusal of explicit nonces is remembered. Calls
+# to it go sequential until then, and the next one after tries explicit
+# again, so a facilitator that turns the path on later is picked up
+# without a restart.
+EXPLICIT_NONCE_RETRY_AFTER_SECS = 10 * 60
 # Width of a requester-chosen nonce. The marketplace requires it to be
 # unique per requester; at this width collisions are not a concern.
 EXPLICIT_NONCE_BITS = 256
@@ -383,6 +389,72 @@ class SlotRegistry:
 
 
 _SLOTS = SlotRegistry()
+
+
+class ExplicitNonceRefusals:
+    """Facilitators that recently turned explicit nonces away, for the process.
+
+    Keyed by (facilitator origin, chain), since that pair decides whether the
+    path is open. An entry lapses ``retry_after_secs`` after the refusal.
+    """
+
+    def __init__(
+        self, retry_after_secs: float = EXPLICIT_NONCE_RETRY_AFTER_SECS
+    ) -> None:
+        """Initialise an empty record.
+
+        :param retry_after_secs: how long a refusal is remembered.
+        """
+        self.retry_after_secs = retry_after_secs
+        self._until: Dict[Tuple[str, str], float] = {}
+        self._guard = threading.Lock()
+
+    @staticmethod
+    def _key(facilitator_base_url: str, chain: str) -> Tuple[str, str]:
+        return facilitator_base_url.rstrip("/").lower(), chain.lower()
+
+    def record(self, facilitator_base_url: str, chain: str) -> None:
+        """Remember that the facilitator refused explicit nonces just now.
+
+        :param facilitator_base_url: origin of the facilitator.
+        :param chain: facilitator chain slug.
+        """
+        key = self._key(facilitator_base_url, chain)
+        with self._guard:
+            self._until[key] = time.monotonic() + self.retry_after_secs
+
+    def refused(self, facilitator_base_url: str, chain: str) -> bool:
+        """Whether a refusal from the facilitator is still remembered.
+
+        :param facilitator_base_url: origin of the facilitator.
+        :param chain: facilitator chain slug.
+        :return: True until ``retry_after_secs`` after the last refusal.
+        """
+        key = self._key(facilitator_base_url, chain)
+        with self._guard:
+            until = self._until.get(key)
+            if until is None:
+                return False
+            if time.monotonic() < until:
+                return True
+            del self._until[key]
+            return False
+
+    def clear(self) -> None:
+        """Forget every refusal."""
+        with self._guard:
+            self._until.clear()
+
+
+_REFUSALS = ExplicitNonceRefusals()
+
+
+def explicit_nonce_refusals() -> ExplicitNonceRefusals:
+    """Return the process-wide record of explicit-nonce refusals.
+
+    :return: the record every adapter in this process shares.
+    """
+    return _REFUSALS
 
 
 def slot_registry() -> SlotRegistry:
@@ -698,7 +770,8 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         :param default_timeout: timeout applied when the caller passes none.
         :param total_deadline_secs: wall-clock cap on one call including retries.
         :param nonce_mode: ``explicit`` or ``sequential``, see ``NonceMode``.
-            An adapter whose explicit request is refused stays sequential.
+            An explicit adapter goes sequential while a refusal from its
+            facilitator is remembered, see ``ExplicitNonceRefusals``.
         :param explicit_nonce_deadline_secs: how long an explicit request
             stays settleable, from the facilitator's clock.
         :param kwargs: passed to ``HTTPAdapter``.
@@ -1274,15 +1347,20 @@ class MechHTTPAdapter(HTTPAdapter):  # pylint: disable=too-many-instance-attribu
         resumed = self._resume_unresolved(call_key, info, deadline, **kwargs)
         if resumed is not None:
             return resumed
-        if self.nonce_mode == NONCE_MODE_EXPLICIT:
+        refusals = explicit_nonce_refusals()
+        if self.nonce_mode == NONCE_MODE_EXPLICIT and not refusals.refused(
+            self.facilitator_base_url, self.chain
+        ):
             explicit = self._send_explicit(call, call_key, info, deadline, **kwargs)
             if explicit is not None:
                 return explicit
             _logger.warning(
                 "mech facilitator does not accept explicit nonces; resending "
-                "with the Safe's sequential nonce, and staying sequential"
+                "with the Safe's sequential nonce, and trying explicit again "
+                "in %.0f s",
+                refusals.retry_after_secs,
             )
-            self.nonce_mode = NONCE_MODE_SEQUENTIAL
+            refusals.record(self.facilitator_base_url, self.chain)
         nonce = self._reserve(info)
         url = f"{self.facilitator_base_url}/mech/{self.api}/{self.chain}"
         busy_budget: Optional[float] = None

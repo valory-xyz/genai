@@ -43,6 +43,7 @@ from packages.valory.connections.x402.clients.mech import (
     EXPLICIT_NONCE_BITS,
     EXPLICIT_NONCE_DEADLINE_SECS,
     EXPLICIT_NONCE_DISABLED_REASON,
+    EXPLICIT_NONCE_RETRY_AFTER_SECS,
     FACILITATOR_WORST_CASE_SECS,
     NONCE_MODE_EXPLICIT,
     NONCE_MODE_SEQUENTIAL,
@@ -52,7 +53,9 @@ from packages.valory.connections.x402.clients.mech import (
     MechRateExceededError,
     MechRequestRejectedError,
     MechSlotHeldElsewhereError,
+    ExplicitNonceRefusals,
     RequesterInfo,
+    explicit_nonce_refusals,
     slot_registry,
     mech_requests,
     release_slot,
@@ -354,6 +357,14 @@ def _empty_slot_registry() -> Any:
     slot_registry().clear()
     yield
     slot_registry().clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_refusals() -> Any:
+    """Start every test with no explicit-nonce refusal remembered."""
+    explicit_nonce_refusals().clear()
+    yield
+    explicit_nonce_refusals().clear()
 
 
 def _patched_send(side_effect: Any):
@@ -2221,7 +2232,7 @@ def test_every_explicit_request_gets_its_own_nonce() -> None:
 def test_a_refused_explicit_request_is_resent_sequentially_and_later_calls_follow(
     status: int, refusal: Dict[str, Any]
 ) -> None:
-    """A sequential-only refusal falls back once and the adapter stays sequential."""
+    """A sequential-only refusal falls back once and later calls follow it."""
     fake = _FakeFacilitator(
         [
             _json_response(status, refusal),
@@ -2246,6 +2257,72 @@ def test_a_refused_explicit_request_is_resent_sequentially_and_later_calls_follo
         assert list(body) == _SEQUENTIAL_FIELDS
         assert body["request_id"] == "0x" + _sequential_id_of(body).hex()
     assert (resent["nonce"], later["nonce"]) == ("7", "8")
+
+
+def test_a_remembered_refusal_lapses_and_explicit_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calls go sequential until the refusal lapses, then explicit is tried again."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    disabled = {"reason": EXPLICIT_NONCE_DISABLED_REASON}
+    fake = _FakeFacilitator(
+        [
+            _json_response(503, disabled),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    session = _default_session(Account.create())
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] += EXPLICIT_NONCE_RETRY_AFTER_SECS - 1
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 2})
+        clock["t"] += 1
+        third = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 3})
+
+    assert third.status_code == 200
+    modes = [_posted_body(fake, i).get("nonce_mode") for i in range(4)]
+    assert modes == [NONCE_MODE_EXPLICIT, None, None, NONCE_MODE_EXPLICIT]
+    assert not explicit_nonce_refusals().refused(_FACILITATOR, _CHAIN)
+
+
+def test_a_refusal_is_shared_by_every_session_for_that_facilitator() -> None:
+    """A second session in the same process goes sequential straight away."""
+    fake = _FakeFacilitator(
+        [
+            _json_response(503, {"reason": EXPLICIT_NONCE_DISABLED_REASON}),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+
+    with _patched(fake):
+        _default_session(Account.create()).post(f"{_FACILITATOR}/x", json={"p": 1})
+        _default_session(Account.create()).post(f"{_FACILITATOR}/x", json={"p": 2})
+
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
+    assert list(_posted_body(fake, 2)) == _SEQUENTIAL_FIELDS
+
+
+def test_a_refusal_is_remembered_per_facilitator_and_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the refusing (origin, chain) pair is held, and only for the window."""
+    clock = {"t": 50.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    refusals = ExplicitNonceRefusals(retry_after_secs=600.0)
+    refusals.record("https://F.example/", "Optimism")
+
+    assert refusals.refused("https://f.example", "optimism")
+    assert not refusals.refused("https://other.example", "optimism")
+    assert not refusals.refused("https://f.example", "base")
+    clock["t"] += 599.5
+    assert refusals.refused("https://f.example", "optimism")
+    clock["t"] += 0.5
+    assert not refusals.refused("https://f.example", "optimism")
 
 
 @pytest.mark.parametrize(
@@ -2276,8 +2353,7 @@ def test_any_other_refusal_of_an_explicit_request_is_raised_not_resent(
 
     assert excinfo.value.status_code == status
     assert [c["method"] for c in fake.calls] == ["GET", "POST"]
-    adapter = session.get_adapter(_FACILITATOR)
-    assert adapter.nonce_mode == NONCE_MODE_EXPLICIT
+    assert not explicit_nonce_refusals().refused(_FACILITATOR, _CHAIN)
 
 
 def test_an_explicit_request_short_of_deposit_raises_the_typed_error() -> None:
