@@ -287,12 +287,10 @@ def _json_response(status: int, payload: Any) -> requests.Response:
 class _FakeFacilitator:
     """Scripted responses per (method, path), recording every call."""
 
-    def __init__(
-        self, post_responses: List[Any], info: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def __init__(self, post_responses: List[Any]) -> None:
         self.calls: List[Dict[str, Any]] = []
         self._posts = list(post_responses)
-        self.info = dict(_INFO_JSON if info is None else info)
+        self.info = dict(_INFO_JSON)
         self.info_headers: Dict[str, str] = {"content-type": "application/json"}
         # Replaces ``info`` after the first POST, to model another call landing.
         self.info_after_post: Optional[Dict[str, Any]] = None
@@ -2068,27 +2066,6 @@ _SEQUENTIAL_FIELDS = [
 _EXPLICIT_REFUSAL_BODY = {
     "detail": "request_id does not match the derived value for this body"
 }
-# The facilitator's explicit-nonce mech: a different contract from
-# ``mech_address``, and the one an explicit request id must name.
-_EXPLICIT_MECH = "0x000000000000000000000000000000000000cAfE"
-_EXPLICIT_INFO_JSON: Dict[str, Any] = {
-    **_INFO_JSON,
-    "explicit_mech_address": _EXPLICIT_MECH,
-    "explicit_min_deadline_secs": 600,
-}
-
-
-# The id an explicit request carries for ``_EXPLICIT_INFO_JSON`` at
-# ``_SERVER_DATE``, nonce ``_CHOSEN_NONCE`` and upstream body ``{"p": 1}``,
-# as eth_account's ``encode_typed_data`` hashes the same typed data.
-_EXPECTED_EXPLICIT_MECH_REQUEST_ID = (
-    "696c1e6e508284c338cedefe245b8b806ba72f7d2a1d8546968fd3f4f6bbe083"
-)
-
-
-def _explicit_facilitator(post_responses: List[Any]) -> _FakeFacilitator:
-    """A facilitator whose requester info offers the explicit-nonce path."""
-    return _FakeFacilitator(post_responses, info=_EXPLICIT_INFO_JSON)
 
 
 def _default_session(account: Account, **kwargs: Any) -> requests.Session:
@@ -2120,7 +2097,7 @@ def _explicit_id_of(body: Dict[str, Any]) -> bytes:
         domain_separator=compute_explicit_nonce_domain_separator(
             _INFO_JSON["chain_id"], _INFO_JSON["marketplace_address"]
         ),
-        mech_address=_EXPLICIT_MECH,
+        mech_address=_INFO_JSON["mech_address"],
         requester=_SAFE,
         data=_upstream_data(body),
         max_delivery_rate=_INFO_JSON["delivery_rates"][_API],
@@ -2154,7 +2131,7 @@ def _no_slot_taken() -> Any:
 def test_explicit_is_the_default_and_signs_a_chosen_nonce() -> None:
     """No mode given: random nonce, typed-data id, deadline on the wire, no slot taken."""
     account = Account.create()
-    fake = _explicit_facilitator([_response(200, _UPSTREAM_BODY)])
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
     fake.info_headers["Date"] = _SERVER_DATE
     session = _default_session(account)
 
@@ -2181,9 +2158,43 @@ def test_explicit_is_the_default_and_signs_a_chosen_nonce() -> None:
     assert slot_registry().live == {}
 
 
+# The id an explicit request carries for ``_INFO_JSON`` at ``_SERVER_DATE``,
+# nonce ``_CHOSEN_NONCE`` and upstream body ``{"p": 1}``, as eth_account's
+# ``encode_typed_data`` hashes the same typed data.
+_EXPECTED_ADAPTER_EXPLICIT_REQUEST_ID = (
+    "37dfd4a479efbd3dcb0fa548107fa4173d040b0028bf35ef04c355009483b2bc"
+)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        _INFO_JSON,
+        {**_INFO_JSON, "explicit_mech_address": "0x000000000000000000000000000000000000cAfE"},
+    ],
+)
+def test_an_explicit_request_names_the_info_mech_in_its_id(
+    info: Dict[str, Any],
+) -> None:
+    """The id commits to ``mech_address``; any other mech field in the info is ignored."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    fake.info = dict(info)
+    fake.info_headers["Date"] = _SERVER_DATE
+    session = _default_session(Account.create())
+
+    with _patched(fake), patch.object(
+        mech_module.secrets, "randbits", return_value=_CHOSEN_NONCE
+    ):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    body = _posted_body(fake)
+    assert body["nonce_mode"] == NONCE_MODE_EXPLICIT
+    assert body["request_id"] == "0x" + _EXPECTED_ADAPTER_EXPLICIT_REQUEST_ID
+
+
 def test_every_explicit_request_gets_its_own_nonce() -> None:
     """Two calls from one Safe never share a nonce, and neither holds a slot."""
-    fake = _explicit_facilitator(
+    fake = _FakeFacilitator(
         [_response(200, _UPSTREAM_BODY), _response(200, _UPSTREAM_BODY)]
     )
     session = _default_session(Account.create())
@@ -2211,7 +2222,7 @@ def test_a_refused_explicit_request_is_resent_sequentially_and_later_calls_follo
     status: int, refusal: Dict[str, Any]
 ) -> None:
     """A sequential-only refusal falls back once and the adapter stays sequential."""
-    fake = _explicit_facilitator(
+    fake = _FakeFacilitator(
         [
             _json_response(status, refusal),
             _response(200, _UPSTREAM_BODY),
@@ -2229,9 +2240,7 @@ def test_a_refused_explicit_request_is_resent_sequentially_and_later_calls_follo
     assert (first.status_code, second.status_code) == (200, 200)
     assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
     randbits.assert_called_once_with(EXPLICIT_NONCE_BITS)
-    refused = _posted_body(fake, 0)
-    assert refused["nonce_mode"] == NONCE_MODE_EXPLICIT
-    assert refused["request_id"] == "0x" + _explicit_id_of(refused).hex()
+    assert _posted_body(fake, 0)["nonce_mode"] == NONCE_MODE_EXPLICIT
     resent, later = _posted_body(fake, 1), _posted_body(fake, 2)
     for body in (resent, later):
         assert list(body) == _SEQUENTIAL_FIELDS
@@ -2257,7 +2266,7 @@ def test_any_other_refusal_of_an_explicit_request_is_raised_not_resent(
     status: int, body: Any
 ) -> None:
     """Only the exact sequential-only refusal falls back; nothing else is retried."""
-    fake = _explicit_facilitator([_json_response(status, body)])
+    fake = _FakeFacilitator([_json_response(status, body)])
     session = _default_session(Account.create())
 
     with _patched(fake), _no_slot_taken(), pytest.raises(
@@ -2283,7 +2292,7 @@ def test_an_explicit_request_short_of_deposit_raises_the_typed_error() -> None:
             }
         },
     )
-    fake = _explicit_facilitator([short])
+    fake = _FakeFacilitator([short])
     session = _default_session(Account.create())
 
     with _patched(fake), _no_slot_taken(), pytest.raises(
@@ -2298,7 +2307,7 @@ def test_an_explicit_request_waits_out_a_busy_safe_and_signs_afresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Busy is waited out on the explicit path too, with a new nonce and no slot."""
-    fake = _explicit_facilitator([_busy_response(), _response(200, _UPSTREAM_BODY)])
+    fake = _FakeFacilitator([_busy_response(), _response(200, _UPSTREAM_BODY)])
     session = _default_session(Account.create())
     slept: List[float] = []
     monkeypatch.setattr(mech_module.time, "sleep", slept.append)
@@ -2320,7 +2329,7 @@ def test_an_unresolved_explicit_body_is_replayed_wherever_the_counter_is(
     """An explicit body holds no slot, so the counter never decides whether it is replayed."""
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
-    fake = _explicit_facilitator(
+    fake = _FakeFacilitator(
         [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
     )
     _deadline_fires_after_the_post(fake, clock)
@@ -2330,7 +2339,7 @@ def test_an_unresolved_explicit_body_is_replayed_wherever_the_counter_is(
         with pytest.raises(MechDeadlineExceededError):
             session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
         # A counter that moved on or not would decide a sequential body's fate.
-        fake.info = {**_EXPLICIT_INFO_JSON, "next_nonce": 3}
+        fake.info = {**_INFO_JSON, "next_nonce": 3}
         response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
 
     assert response.status_code == 200
@@ -2346,7 +2355,7 @@ def test_a_refused_replay_of_an_explicit_body_falls_back_like_a_fresh_one(
     clock = {"t": 1_000.0}
     monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
     disabled = {"reason": EXPLICIT_NONCE_DISABLED_REASON}
-    fake = _explicit_facilitator(
+    fake = _FakeFacilitator(
         [
             requests.exceptions.ReadTimeout("slow"),
             _json_response(503, disabled),
@@ -2370,7 +2379,7 @@ def test_a_refused_replay_of_an_explicit_body_falls_back_like_a_fresh_one(
 
 def test_sequential_opt_in_sends_exactly_the_sequential_payload() -> None:
     """Asked for sequential: the counter slot, the ``getRequestId`` id, no new fields."""
-    fake = _explicit_facilitator([_response(200, _UPSTREAM_BODY)])
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
     session = _default_session(Account.create(), nonce_mode=NONCE_MODE_SEQUENTIAL)
 
     with _patched(fake), patch.object(
@@ -2382,101 +2391,6 @@ def test_sequential_opt_in_sends_exactly_the_sequential_payload() -> None:
     assert list(body) == _SEQUENTIAL_FIELDS
     assert body["nonce"] == "7"
     assert body["request_id"] == "0x" + _sequential_id_of(body).hex()
-
-
-def test_an_explicit_request_names_the_explicit_mech_in_its_id() -> None:
-    """The id commits to ``explicit_mech_address``, not to the sequential mech."""
-    fake = _explicit_facilitator([_response(200, _UPSTREAM_BODY)])
-    fake.info_headers["Date"] = _SERVER_DATE
-    session = _default_session(Account.create())
-
-    with _patched(fake), patch.object(
-        mech_module.secrets, "randbits", return_value=_CHOSEN_NONCE
-    ):
-        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
-
-    body = _posted_body(fake)
-    assert body["request_id"] == "0x" + _EXPECTED_EXPLICIT_MECH_REQUEST_ID
-    assert body["request_id"] == "0x" + _explicit_id_of(body).hex()
-    signed_for_old_mech = derive_explicit_request_id(
-        domain_separator=compute_explicit_nonce_domain_separator(
-            _INFO_JSON["chain_id"], _INFO_JSON["marketplace_address"]
-        ),
-        mech_address=_INFO_JSON["mech_address"],
-        requester=_SAFE,
-        data=_upstream_data(body),
-        max_delivery_rate=_INFO_JSON["delivery_rates"][_API],
-        payment_type=bytes.fromhex(_INFO_JSON["payment_type"][2:]),
-        nonce=_CHOSEN_NONCE,
-        deadline=_SERVER_NOW + EXPLICIT_NONCE_DEADLINE_SECS,
-    )
-    assert body["request_id"] != "0x" + signed_for_old_mech.hex()
-
-
-@pytest.mark.parametrize(
-    "info",
-    [
-        _INFO_JSON,
-        {**_INFO_JSON, "explicit_mech_address": None},
-        {**_INFO_JSON, "explicit_mech_address": ""},
-    ],
-)
-def test_no_explicit_mech_in_the_info_sends_sequential_without_trying(
-    info: Dict[str, Any],
-) -> None:
-    """With no explicit mech offered, one sequential POST for the sequential mech."""
-    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)], info=info)
-    session = _default_session(Account.create())
-
-    with _patched(fake), patch.object(
-        mech_module.secrets, "randbits", side_effect=AssertionError("random nonce")
-    ):
-        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
-
-    assert response.status_code == 200
-    assert [c["method"] for c in fake.calls] == ["GET", "POST"]
-    body = _posted_body(fake)
-    assert list(body) == _SEQUENTIAL_FIELDS
-    assert body["nonce"] == "7"
-    assert body["request_id"] == "0x" + _sequential_id_of(body).hex()
-    assert session.get_adapter(_FACILITATOR).nonce_mode == NONCE_MODE_EXPLICIT
-
-
-def test_explicit_is_tried_again_once_the_facilitator_offers_it() -> None:
-    """A call that went sequential for want of an explicit mech does not latch."""
-    fake = _FakeFacilitator(
-        [_response(200, _UPSTREAM_BODY), _response(200, _UPSTREAM_BODY)]
-    )
-    session = _default_session(Account.create())
-
-    with _patched(fake):
-        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
-        fake.info = dict(_EXPLICIT_INFO_JSON)
-        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 2})
-
-    first, second = _posted_body(fake, 0), _posted_body(fake, 1)
-    assert list(first) == _SEQUENTIAL_FIELDS
-    assert second["nonce_mode"] == NONCE_MODE_EXPLICIT
-    assert second["request_id"] == "0x" + _explicit_id_of(second).hex()
-
-
-def test_an_explicit_mech_withdrawn_while_busy_sends_sequential(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A busy wait whose fresh info names no explicit mech resends sequentially."""
-    fake = _explicit_facilitator([_busy_response(), _response(200, _UPSTREAM_BODY)])
-    fake.info_after_post = dict(_INFO_JSON)
-    session = _default_session(Account.create())
-    monkeypatch.setattr(mech_module.time, "sleep", lambda _secs: None)
-
-    with _patched(fake):
-        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
-
-    assert response.status_code == 200
-    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
-    resent = _posted_body(fake, 1)
-    assert list(resent) == _SEQUENTIAL_FIELDS
-    assert resent["request_id"] == "0x" + _sequential_id_of(resent).hex()
 
 
 @pytest.mark.parametrize("nonce_mode", ["Explicit", "", None, "random"])
