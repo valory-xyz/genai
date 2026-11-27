@@ -17,13 +17,15 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Byte-exact mirrors of the facilitator's canonical bytes, the marketplace request ids and the Safe message wrap.
+"""Byte-exact mirrors of the facilitator's canonical bytes, the marketplace request ids, the Safe message wrap and the off-chain request CID.
 
 Change them only together with their counterparts (x402-poc
-``mech_facilitator/canonical.py`` and ``request_id.py``, the
-mech_interact skill); the tests pin the shared golden vectors.
+``mech_facilitator/canonical.py``, ``request_id.py`` and ``local_cid.py``,
+the mech_interact skill, mech-client); the tests pin the shared golden
+vectors.
 """
 
+import hashlib
 import json
 from typing import Dict
 
@@ -262,3 +264,52 @@ def compute_safe_message_hash(
         abi_encode(["bytes32", "bytes32"], [_SAFE_MESSAGE_TYPEHASH, keccak(message)])
     )
     return keccak(b"\x19\x01" + domain_separator + struct_hash)
+
+
+# The single DAG-PB block ``ipfs add --cid-version=1 --raw-leaves=false``
+# stores. Off-chain requests never publish their metadata, so both sides
+# compute its CID locally and must agree byte for byte.
+MAX_CID_BLOCK_BYTES = 256 * 1024
+_UNIXFS_TYPE_FILE = 2
+
+
+def _varint(value: int) -> bytes:
+    """Encode a non-negative integer as a protobuf varint."""
+    if value < 0:
+        raise ValueError("varint requires a non-negative value")
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _dag_pb_block(content: bytes) -> bytes:
+    """Return the link-less PBNode wrapping a UnixFS ``File`` of ``content``."""
+    unixfs = _varint((1 << 3) | 0) + _varint(_UNIXFS_TYPE_FILE)
+    if content:
+        unixfs += _varint((2 << 3) | 2) + _varint(len(content)) + content
+    unixfs += _varint((3 << 3) | 0) + _varint(len(content))
+    return _varint((1 << 3) | 2) + _varint(len(unixfs)) + unixfs
+
+
+def cidv1_digest(content: bytes) -> bytes:
+    """Return the 32-byte SHA-256 digest carried by the CIDv1 of ``content``.
+
+    This is the ``ipfs_hash`` an off-chain request signs as its data.
+
+    :param content: the request metadata bytes, as posted in ``ipfs_data``.
+    :return: the digest.
+    :raises ValueError: above ``MAX_CID_BLOCK_BYTES``, where the CID would
+        need a linked DAG this does not build.
+    """
+    if len(content) > MAX_CID_BLOCK_BYTES:
+        raise ValueError(
+            f"content size {len(content)} exceeds the single-block bound "
+            f"{MAX_CID_BLOCK_BYTES}"
+        )
+    return hashlib.sha256(_dag_pb_block(content)).digest()

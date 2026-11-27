@@ -22,6 +22,7 @@
 
 import json
 import pickle  # nosec
+import time
 from typing import Any, Dict, Optional, Tuple, cast
 
 import google.generativeai as genai  # type: ignore
@@ -42,6 +43,12 @@ from packages.valory.connections.x402.clients.mech import (
     MechDepositRequiredError,
     mech_requests,
 )
+from packages.valory.connections.x402.clients.mech_standard import (
+    MechLimitBelowMinimumError,
+    MechRequestFailedError,
+    MechStandardRouteUnavailableError,
+    mech_standard_requests,
+)
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
@@ -57,6 +64,8 @@ AVAILABLE_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
 ]
+# The models the facilitator's standard chat tool serves.
+STANDARD_ROUTE_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 REQUIRED_PROPERTIES_IN_PAYLOAD = ["prompt"]
 DEFAULT_MODEL = "gemini-2.5-flash"
 
@@ -64,6 +73,9 @@ GENERATE_ENDPOINT = "generateContent"
 # Gemini REST prefix the facilitator forwards to, same as the x402 proxy.
 GEMINI_UPSTREAM_PREFIX = "/v1beta"
 MECH_API = "chat"
+# After the facilitator answers that it does not serve the standard route,
+# calls go by its /mech/chat route for this long before trying again.
+STANDARD_ROUTE_RETRY_SECS = 3600.0
 
 # Forwarded to the SDK as ``request_options.timeout`` so the deadline is
 # enforced inside gRPC where the actual blocking I/O happens. A slow
@@ -106,13 +118,16 @@ def _check_payment_flags(
     use_x402: Any,
     use_mech_facilitator: bool,
     mech_max_delivery_rate: Any = None,
+    mech_standard_route: bool = True,
 ) -> None:
     """Warn at construction about a mech configuration that cannot work as intended.
 
     :param logger: the connection logger.
     :param use_x402: the ``use_x402`` config value.
     :param use_mech_facilitator: the ``use_mech_facilitator`` config value.
-    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value.
+    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value,
+        read only on the facilitator's own ``/mech/chat`` route.
+    :param mech_standard_route: the ``mech_standard_route`` config value.
     """
     if use_mech_facilitator and not use_x402:
         logger.warning(
@@ -120,10 +135,17 @@ def _check_payment_flags(
             "facilitator is only used on the paid path, so this flag is ignored"
         )
     if use_mech_facilitator and mech_max_delivery_rate is None:
-        logger.warning(
-            "use_mech_facilitator is set without mech_max_delivery_rate; every "
-            "mech call will be refused until a cap is configured"
-        )
+        if mech_standard_route:
+            logger.warning(
+                "use_mech_facilitator is set without mech_max_delivery_rate; "
+                "calls fail while the facilitator does not serve the standard "
+                "route, since its /mech/chat route needs a cap"
+            )
+        else:
+            logger.warning(
+                "use_mech_facilitator is set without mech_max_delivery_rate; every "
+                "mech call will be refused until a cap is configured"
+            )
 
 
 class GenaiConnection(BaseSyncConnection):
@@ -161,11 +183,17 @@ class GenaiConnection(BaseSyncConnection):
         self.use_mech_facilitator = bool(
             self.configuration.config.get("use_mech_facilitator", False)
         )
+        # The standard off-chain mech request; off, the facilitator's
+        # own /mech/chat route, which it will retire.
+        self.mech_standard_route = bool(
+            self.configuration.config.get("mech_standard_route", True)
+        )
         _check_payment_flags(
             self.logger,
             self.use_x402,
             self.use_mech_facilitator,
             self.configuration.config.get("mech_max_delivery_rate"),
+            self.mech_standard_route,
         )
         self.mech_facilitator_base_url = self.configuration.config.get(
             "mech_facilitator_base_url"
@@ -177,10 +205,25 @@ class GenaiConnection(BaseSyncConnection):
         self.mech_max_delivery_rate = self.configuration.config.get(
             "mech_max_delivery_rate"
         )
+        # Standard route: the facilitator mech per chain, its payment type
+        # when it is not the default mech, and the limit signed per request
+        # per chain, in that mech's base units (a chain without one signs
+        # twice the facilitator's expected price).
+        self.mech_facilitator_mech_addresses: Dict[str, str] = dict(
+            self.configuration.config.get("mech_facilitator_mech_addresses") or {}
+        )
+        self.mech_facilitator_payment_types: Dict[str, str] = dict(
+            self.configuration.config.get("mech_facilitator_payment_types") or {}
+        )
+        self.mech_delivery_rate_limits: Dict[str, int] = dict(
+            self.configuration.config.get("mech_delivery_rate_limits") or {}
+        )
         # Built once and reused: the mech adapter remembers a signed request
         # whose outcome is unknown and replays it on the next identical
         # call, which only works if one session serves every request.
+        self._standard_mech_session: Optional[requests.Session] = None
         self._mech_session: Optional[requests.Session] = None
+        self._standard_route_paused_until = 0.0
         self.connection_private_key = self.crypto_store.private_keys.get("ethereum")
         genai.configure(api_key=genai_api_key)
 
@@ -275,6 +318,13 @@ class GenaiConnection(BaseSyncConnection):
                 "mech facilitator enabled but mech_facilitator_base_url or the "
                 f"Safe address for chain {chain!r} is not configured"
             )
+        base_url = str(self.mech_facilitator_base_url).rstrip("/")
+        if self._standard_route_in_use():
+            if self._standard_mech_session is None:
+                self._standard_mech_session = self._standard_session(
+                    chain, safe_address
+                )
+            return self._standard_mech_session, base_url + GEMINI_UPSTREAM_PREFIX
         if self.mech_max_delivery_rate is None:
             # Without a cap the agent would sign whatever rate the
             # facilitator reports, so one bad rate could drain the deposit.
@@ -290,8 +340,81 @@ class GenaiConnection(BaseSyncConnection):
                 facilitator_base_url=str(self.mech_facilitator_base_url),
                 max_delivery_rate=int(self.mech_max_delivery_rate),
             )
-        base_url = str(self.mech_facilitator_base_url).rstrip("/")
         return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
+
+    def _standard_route_configured(self) -> bool:
+        """Whether paid calls are configured to go by the standard mech route.
+
+        :return: True when they are.
+        """
+        return self.use_x402 and self.use_mech_facilitator and self.mech_standard_route
+
+    def _standard_route_in_use(self) -> bool:
+        """Whether the next paid call goes by the standard mech route.
+
+        :return: True unless the route is off or paused after a 404.
+        """
+        return (
+            self.mech_standard_route
+            and time.monotonic() >= self._standard_route_paused_until
+        )
+
+    def _post_paid(self, url: str, body: str) -> requests.Response:
+        """Post one paid call, by the facilitator's /mech/chat route if the standard one is not served.
+
+        :param url: the upstream URL.
+        :param body: the JSON request body.
+        :return: the upstream response.
+        """
+        session, _ = self._paid_session_and_base_url()
+        headers = {"Content-Type": "application/json"}
+        try:
+            return session.post(url, headers=headers, data=body)
+        except MechStandardRouteUnavailableError as exc:
+            if not self._standard_route_in_use():
+                raise
+            self.logger.warning(
+                f"mech facilitator does not serve the standard route ({exc}); using "
+                f"its /mech/chat route for {STANDARD_ROUTE_RETRY_SECS:.0f} s"
+            )
+            self._standard_route_paused_until = (
+                time.monotonic() + STANDARD_ROUTE_RETRY_SECS
+            )
+        session, _ = self._paid_session_and_base_url()
+        return session.post(url, headers=headers, data=body)
+
+    def _standard_session(self, chain: str, safe_address: str) -> requests.Session:
+        """Build the session that sends chat as standard mech requests.
+
+        :param chain: the lower-case chain name.
+        :param safe_address: the Safe that pays.
+        :return: the session.
+        """
+
+        def _for_chain(values: Dict[str, Any]) -> Any:
+            return next(
+                (v for k, v in values.items() if str(k).lower() == chain and v), None
+            )
+
+        payment_type = _for_chain(self.mech_facilitator_payment_types)
+        limit = _for_chain(self.mech_delivery_rate_limits)
+        try:
+            return mech_standard_requests(
+                self._eoa_account,
+                safe_address=safe_address,
+                chain=chain,
+                api=MECH_API,
+                facilitator_base_url=str(self.mech_facilitator_base_url),
+                delivery_rate_limit=None if limit is None else int(limit),
+                mech_address=_for_chain(self.mech_facilitator_mech_addresses),
+                payment_type=(
+                    None
+                    if payment_type is None
+                    else bytes.fromhex(str(payment_type).removeprefix("0x"))
+                ),
+            )
+        except ValueError as exc:
+            raise PaymentError(f"mech facilitator misconfigured: {exc}") from exc
 
     def _process_x402_request(
         self,
@@ -299,7 +422,7 @@ class GenaiConnection(BaseSyncConnection):
         model_name: str,
         generation_config_kwargs: dict,
     ) -> Tuple[str, bool]:
-        session, base_url = self._paid_session_and_base_url()
+        _, base_url = self._paid_session_and_base_url()
 
         # Make request
         url = f"{base_url}/models/{model_name}:generateContent"
@@ -326,9 +449,7 @@ class GenaiConnection(BaseSyncConnection):
                 )
         if generation_config:
             data["generationConfig"] = generation_config
-        response = session.post(
-            url, headers={"Content-Type": "application/json"}, data=json.dumps(data)
-        )
+        response = self._post_paid(url, json.dumps(data))
 
         try:
             response.raise_for_status()
@@ -392,6 +513,17 @@ class GenaiConnection(BaseSyncConnection):
             return {
                 "error": f"Model {model_name} is not an available model [{AVAILABLE_MODELS}]"
             }, True
+        if (
+            self._standard_route_configured()
+            and model_name not in STANDARD_ROUTE_MODELS
+        ):
+            return {
+                "error": (
+                    f"Model {model_name} is not served on the standard mech route "
+                    f"[{STANDARD_ROUTE_MODELS}]"
+                ),
+                "code": "mech_model_not_served",
+            }, True
 
         generation_config_kwargs = {
             "temperature": payload.get("temperature", DEFAULT_TEMPERATURE)
@@ -436,6 +568,24 @@ class GenaiConnection(BaseSyncConnection):
                     "reserved": e.reserved,
                     "available": e.available,
                     "required": e.required,
+                },
+            }, True
+        except MechLimitBelowMinimumError as e:
+            return {
+                "error": f"mech request limit below minimum: {e}",
+                "code": "mech_limit_below_minimum",
+                "context": {"limit": e.limit, "minimum": e.minimum},
+            }, True
+        except MechRequestFailedError as e:
+            # Delivered and charged; ``fault`` says whether a different
+            # request would have avoided it.
+            return {
+                "error": f"mech request failed: {e}",
+                "code": "mech_request_failed",
+                "context": {
+                    "request_id": e.request_id,
+                    "fault": e.fault,
+                    "delivery_rate": e.delivery_rate,
                 },
             }, True
         except PaymentError as e:
