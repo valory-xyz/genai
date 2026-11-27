@@ -106,6 +106,7 @@ def _cid_string(content: bytes) -> str:
             "bafybeiay23kics7rguz4kaxxmyz7d6bciozygbi27wllerri6dpqenuifi",
         ),
     ],
+    ids=["empty", "hello", "json", "100kb"],
 )
 def test_cid_matches_ipfs_add_output(content: bytes, expected: str) -> None:
     """The local CID is what ``ipfs add --cid-version=1`` gives, as on mech-client."""

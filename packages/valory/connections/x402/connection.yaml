@@ -23,7 +23,7 @@ fingerprint:
   tests/__init__.py: bafybeictmkqd6rxyk3qf4lwc4hig5g7rdzoukjicweard6abpcvfxyeb7y
   tests/test_clients.py: bafybeifamuvhzix3oldmxf77tkqnaxkd2ocezrdc34zydv7l6sygv4ioni
   tests/test_mech.py: bafybeieeyvbuc2xna47argog3mq3foyahrsfrl7jmxa4ypqzo25qfue6wa
-  tests/test_mech_standard.py: bafybeify63vrnnzqmk43jethg6sln7f3hc373myhirglni6rbhrtvop2pe
+  tests/test_mech_standard.py: bafybeiceke7k7eg5qhcqbcsfsivse4zvc62t74x7zxlt5v27mrcizerinq
   types.py: bafybeidasd6o2fzvohtvmp2azaq3jbdjzaproiqy5jhx7kqe7il3vyh6iq
 fingerprint_ignore_patterns: []
 connections: []
