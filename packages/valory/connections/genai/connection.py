@@ -42,6 +42,9 @@ from packages.valory.connections.x402.clients.mech import (
     MechDepositRequiredError,
     mech_requests,
 )
+from packages.valory.connections.x402.clients.mech_standard import (
+    mech_standard_requests,
+)
 from packages.valory.connections.x402.clients.requests import x402_requests
 from packages.valory.protocols.srr.dialogues import SrrDialogue
 from packages.valory.protocols.srr.dialogues import SrrDialogues as BaseSrrDialogues
@@ -106,20 +109,27 @@ def _check_payment_flags(
     use_x402: Any,
     use_mech_facilitator: bool,
     mech_max_delivery_rate: Any = None,
+    mech_standard_route: bool = True,
 ) -> None:
     """Warn at construction about a mech configuration that cannot work as intended.
 
     :param logger: the connection logger.
     :param use_x402: the ``use_x402`` config value.
     :param use_mech_facilitator: the ``use_mech_facilitator`` config value.
-    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value.
+    :param mech_max_delivery_rate: the ``mech_max_delivery_rate`` config value,
+        read only on the facilitator's own ``/mech/chat`` route.
+    :param mech_standard_route: the ``mech_standard_route`` config value.
     """
     if use_mech_facilitator and not use_x402:
         logger.warning(
             "use_mech_facilitator is set but use_x402 is off; the mech "
             "facilitator is only used on the paid path, so this flag is ignored"
         )
-    if use_mech_facilitator and mech_max_delivery_rate is None:
+    if (
+        use_mech_facilitator
+        and not mech_standard_route
+        and mech_max_delivery_rate is None
+    ):
         logger.warning(
             "use_mech_facilitator is set without mech_max_delivery_rate; every "
             "mech call will be refused until a cap is configured"
@@ -161,11 +171,17 @@ class GenaiConnection(BaseSyncConnection):
         self.use_mech_facilitator = bool(
             self.configuration.config.get("use_mech_facilitator", False)
         )
+        # The standard off-chain mech request; off, the facilitator's
+        # own /mech/chat route, which it will retire.
+        self.mech_standard_route = bool(
+            self.configuration.config.get("mech_standard_route", True)
+        )
         _check_payment_flags(
             self.logger,
             self.use_x402,
             self.use_mech_facilitator,
             self.configuration.config.get("mech_max_delivery_rate"),
+            self.mech_standard_route,
         )
         self.mech_facilitator_base_url = self.configuration.config.get(
             "mech_facilitator_base_url"
@@ -176,6 +192,18 @@ class GenaiConnection(BaseSyncConnection):
         )
         self.mech_max_delivery_rate = self.configuration.config.get(
             "mech_max_delivery_rate"
+        )
+        # Standard route: the facilitator mech per chain, its payment type
+        # when it is not the default mech, and the limit signed per request
+        # (``None`` signs twice the facilitator's expected price).
+        self.mech_facilitator_mech_addresses: Dict[str, str] = dict(
+            self.configuration.config.get("mech_facilitator_mech_addresses") or {}
+        )
+        self.mech_facilitator_payment_types: Dict[str, str] = dict(
+            self.configuration.config.get("mech_facilitator_payment_types") or {}
+        )
+        self.mech_delivery_rate_limit = self.configuration.config.get(
+            "mech_delivery_rate_limit"
         )
         # Built once and reused: the mech adapter remembers a signed request
         # whose outcome is unknown and replays it on the next identical
@@ -275,6 +303,11 @@ class GenaiConnection(BaseSyncConnection):
                 "mech facilitator enabled but mech_facilitator_base_url or the "
                 f"Safe address for chain {chain!r} is not configured"
             )
+        base_url = str(self.mech_facilitator_base_url).rstrip("/")
+        if self.mech_standard_route:
+            if self._mech_session is None:
+                self._mech_session = self._standard_session(chain, safe_address)
+            return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
         if self.mech_max_delivery_rate is None:
             # Without a cap the agent would sign whatever rate the
             # facilitator reports, so one bad rate could drain the deposit.
@@ -290,8 +323,40 @@ class GenaiConnection(BaseSyncConnection):
                 facilitator_base_url=str(self.mech_facilitator_base_url),
                 max_delivery_rate=int(self.mech_max_delivery_rate),
             )
-        base_url = str(self.mech_facilitator_base_url).rstrip("/")
         return self._mech_session, base_url + GEMINI_UPSTREAM_PREFIX
+
+    def _standard_session(self, chain: str, safe_address: str) -> requests.Session:
+        """Build the session that sends chat as standard mech requests.
+
+        :param chain: the lower-case chain name.
+        :param safe_address: the Safe that pays.
+        :return: the session.
+        """
+
+        def _for_chain(values: Dict[str, str]) -> Optional[str]:
+            return next(
+                (v for k, v in values.items() if str(k).lower() == chain and v), None
+            )
+
+        payment_type = _for_chain(self.mech_facilitator_payment_types)
+        limit = self.mech_delivery_rate_limit
+        try:
+            return mech_standard_requests(
+                self._eoa_account,
+                safe_address=safe_address,
+                chain=chain,
+                api=MECH_API,
+                facilitator_base_url=str(self.mech_facilitator_base_url),
+                delivery_rate_limit=None if limit is None else int(limit),
+                mech_address=_for_chain(self.mech_facilitator_mech_addresses),
+                payment_type=(
+                    None
+                    if payment_type is None
+                    else bytes.fromhex(str(payment_type).removeprefix("0x"))
+                ),
+            )
+        except ValueError as exc:
+            raise PaymentError(f"mech facilitator misconfigured: {exc}") from exc
 
     def _process_x402_request(
         self,

@@ -25,17 +25,21 @@
 import base64
 import json
 from types import SimpleNamespace
-from typing import Any, cast
-from unittest.mock import MagicMock
+from typing import Any, Dict, List, cast
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qsl, urlsplit
 
 import google.api_core.exceptions
 import pytest
+import requests
+from eth_account import Account
 
 from packages.valory.connections.genai import connection as genai_connection
 from packages.valory.connections.genai.connection import (
     GENAI_DIRECT_TIMEOUT_SECONDS,
     GenaiConnection,
 )
+from packages.valory.connections.x402.clients import mech_standard
 from packages.valory.connections.x402.clients.base import (
     PaymentError,
     PaymentRejectedAfterRetryError,
@@ -148,6 +152,12 @@ class TestProcessX402RequestPaymentResponseHeader:
         stub = SimpleNamespace(
             use_x402=True,
             use_mech_facilitator=False,
+            # The facilitator's own /mech/chat route; the standard route has
+            # its own tests below.
+            mech_standard_route=False,
+            mech_facilitator_mech_addresses={},
+            mech_facilitator_payment_types={},
+            mech_delivery_rate_limit=None,
             mech_facilitator_base_url="http://facilitator.example",
             mech_chain="optimism",
             mech_safe_addresses={"optimism": "0x" + "11" * 20},
@@ -167,6 +177,9 @@ class TestProcessX402RequestPaymentResponseHeader:
             lambda: GenaiConnection._paid_session_and_base_url(
                 cast(GenaiConnection, stub)
             )
+        )
+        stub._standard_session = lambda chain, safe: GenaiConnection._standard_session(
+            cast(GenaiConnection, stub), chain, safe
         )
         return stub
 
@@ -647,7 +660,7 @@ class TestMechFacilitatorPath:
         """Enabling the mech path without a rate cap is called out when the connection starts."""
         logger = MagicMock()
 
-        genai_connection._check_payment_flags(logger, True, True, None)
+        genai_connection._check_payment_flags(logger, True, True, None, False)
 
         assert logger.warning.called is True
 
@@ -709,3 +722,134 @@ class TestMechFacilitatorPath:
             "available": 2000,
             "required": 10000,
         }
+
+
+_SAFE = "0x" + "11" * 20
+_EOA_KEY = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+_GEMINI_TEXT_ANSWER = '{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}'
+
+
+class _StandardFacilitator:
+    """Answers the two standard-route calls; records every posted form."""
+
+    def __init__(self) -> None:
+        self.forms: List[Dict[str, str]] = []
+
+    def send(self, request: requests.PreparedRequest) -> requests.Response:
+        parts = urlsplit(str(request.url))
+        response = requests.Response()
+        response.status_code = 200
+        if parts.path.endswith("/send_signed_requests"):
+            body = request.body
+            text = body.decode() if isinstance(body, bytes) else str(body)
+            form = dict(parse_qsl(text))
+            self.forms.append(form)
+            payload: Dict[str, Any] = {"request_id": form["request_id"]}
+        else:
+            request_id = dict(parse_qsl(parts.query))["request_id"]
+            payload = {
+                "request_id": request_id,
+                "status": "ok",
+                "response": {"result": _GEMINI_TEXT_ANSWER},
+                "delivery_rate": 7000,
+            }
+        response._content = json.dumps(payload).encode("utf-8")
+        return response
+
+
+class TestStandardMechRoute:
+    """Chat as a standard off-chain mech request, the default on the mech path."""
+
+    def _stub(self, **overrides: Any) -> Any:
+        stub = TestProcessX402RequestPaymentResponseHeader()._make_x402_stub(
+            use_mech_facilitator=True,
+            mech_standard_route=True,
+            mech_max_delivery_rate=None,
+            mech_safe_addresses={"optimism": _SAFE},
+            _eoa_account=Account.from_key(_EOA_KEY),
+        )
+        for key, value in overrides.items():
+            setattr(stub, key, value)
+        return stub
+
+    def _run(self, stub: Any, fake: _StandardFacilitator, **config: Any) -> Any:
+        with patch.object(
+            requests.adapters.HTTPAdapter,
+            "send",
+            lambda _adapter, request, **_kw: fake.send(request),
+        ):
+            return GenaiConnection._process_x402_request(
+                stub,
+                payload={"prompt": "hi"},
+                model_name="gemini-2.5-flash",
+                generation_config_kwargs=config,
+            )
+
+    def test_chat_reaches_the_facilitator_mech_as_a_chat_tool_request(self) -> None:
+        """The Gemini body is signed as the chat tool's prompt, and the answer read back."""
+        mech_standard.standard_explicit_nonce_refusals().clear()
+        fake = _StandardFacilitator()
+        stub = self._stub()
+
+        text, error = self._run(stub, fake, temperature=0.5)
+
+        assert (text, error) == ("hello", False)
+        (form,) = fake.forms
+        metadata = json.loads(form["ipfs_data"])
+        prompt = json.loads(metadata["prompt"])
+        assert metadata["tool"] == "chat"
+        assert prompt["model"] == "gemini-2.5-flash"
+        assert prompt["contents"] == [{"parts": [{"text": "hi"}]}]
+        assert prompt["generationConfig"] == {"temperature": 0.5}
+        assert form["sender"] == _SAFE
+        assert form["delivery_rate"] == "30000"
+        stub.logger.warning.assert_not_called()
+
+    def test_configured_limit_and_mech_reach_the_signed_request(self) -> None:
+        """A limit, mech and payment type from config are what gets signed."""
+        fake = _StandardFacilitator()
+        other_mech = "0x" + "99" * 20
+        stub = self._stub(
+            mech_delivery_rate_limit=20000,
+            mech_facilitator_mech_addresses={"Optimism": other_mech},
+            mech_facilitator_payment_types={
+                "optimism": "0x" + mech_standard.PAYMENT_TYPE_USDC.hex()
+            },
+        )
+
+        self._run(stub, fake)
+
+        adapter = stub._mech_session.adapters["https://"]
+        assert adapter.mech_address.lower() == other_mech
+        assert fake.forms[0]["delivery_rate"] == "20000"
+
+    @pytest.mark.parametrize(
+        "overrides,match",
+        [
+            ({"mech_delivery_rate_limit": 1}, "below the facilitator's minimum"),
+            (
+                {"mech_facilitator_mech_addresses": {"optimism": "0x" + "99" * 20}},
+                "payment type must be configured",
+            ),
+            (
+                {"mech_chain": "arbitrum", "mech_safe_addresses": {"arbitrum": _SAFE}},
+                "no facilitator mech",
+            ),
+        ],
+    )
+    def test_unusable_standard_settings_are_a_payment_error(
+        self, overrides: Dict[str, Any], match: str
+    ) -> None:
+        """A setting that could only be refused surfaces as a PaymentError."""
+        stub = self._stub(**overrides)
+
+        with pytest.raises(PaymentError, match=match):
+            stub._paid_session_and_base_url()
+
+    def test_standard_route_does_not_need_the_legacy_rate_cap(self) -> None:
+        """``mech_max_delivery_rate`` belongs to /mech/chat and is not warned about here."""
+        logger = MagicMock()
+
+        genai_connection._check_payment_flags(logger, True, True, None, True)
+
+        logger.warning.assert_not_called()
