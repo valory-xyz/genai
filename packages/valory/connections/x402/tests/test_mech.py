@@ -40,14 +40,22 @@ from packages.valory.connections.x402.clients.mech import (
     DEFAULT_MECH_TIMEOUT,
     DEFAULT_REQUEST_TTL_SECS,
     DEFAULT_TOTAL_DEADLINE_SECS,
+    EXPLICIT_NONCE_BITS,
+    EXPLICIT_NONCE_DEADLINE_SECS,
+    EXPLICIT_NONCE_DISABLED_REASON,
+    EXPLICIT_NONCE_RETRY_AFTER_SECS,
     FACILITATOR_WORST_CASE_SECS,
+    NONCE_MODE_EXPLICIT,
+    NONCE_MODE_SEQUENTIAL,
     MechDeadlineExceededError,
     MechDepositRequiredError,
     MechOutcomeUnknownError,
     MechRateExceededError,
     MechRequestRejectedError,
     MechSlotHeldElsewhereError,
+    ExplicitNonceRefusals,
     RequesterInfo,
+    explicit_nonce_refusals,
     slot_registry,
     mech_requests,
     release_slot,
@@ -56,7 +64,9 @@ from packages.valory.connections.x402.clients.mech import (
 from packages.valory.connections.x402.mech_signing import (
     canonical_request_data,
     compute_domain_separator,
+    compute_explicit_nonce_domain_separator,
     compute_safe_message_hash,
+    derive_explicit_request_id,
     derive_request_id,
 )
 
@@ -143,6 +153,83 @@ def test_safe_message_hash_rejects_wrong_length() -> None:
     """Only a 32-byte request_id can be wrapped."""
     with pytest.raises(ValueError):
         compute_safe_message_hash(b"\x01", _SAFE_FOR_VECTOR, _CHAIN_ID)
+
+
+# The explicit-nonce vector shared with mech-client's
+# ``test_request_id_reproduces_the_mech_s_vector`` (fixed domain separator,
+# so it pins the ``ExplicitNonceDelivery`` struct alone), and the domain the
+# mech's ``compute_explicit_nonce_domain_separator`` gives for chain 100.
+_VECTOR_DOMAIN_SEPARATOR = bytes.fromhex("5a" * 32)
+_VECTOR_MECH = "0x77af31De935740567Cf4fF1986D04B2c964A786a"
+_VECTOR_REQUESTER = Account.from_key("0x" + "1" * 64).address
+_VECTOR_DATA = bytes.fromhex("bb" * 32)
+_VECTOR_NONCE = 0xDEADBEEF
+_VECTOR_DEADLINE = 1_900_000_000
+_EXPECTED_EXPLICIT_REQUEST_ID = (
+    "65790905cee19a886176ee0835e817eb6b326aef18ab1455a2f35ae6f7bbd7e6"
+)
+_EXPECTED_EXPLICIT_DOMAIN = (
+    "0ed35ba83631c0159dcc62e23e08897f5a6f1ccf8b3d9e12703857099d39227d"
+)
+
+
+def _vector_explicit_request_id(**overrides: Any) -> bytes:
+    kwargs: Dict[str, Any] = {
+        "domain_separator": _VECTOR_DOMAIN_SEPARATOR,
+        "mech_address": _VECTOR_MECH,
+        "requester": _VECTOR_REQUESTER,
+        "data": _VECTOR_DATA,
+        "max_delivery_rate": _DELIVERY_RATE,
+        "payment_type": _PAYMENT_TYPE,
+        "nonce": _VECTOR_NONCE,
+        "deadline": _VECTOR_DEADLINE,
+    }
+    kwargs.update(overrides)
+    return derive_explicit_request_id(**kwargs)
+
+
+def test_explicit_request_id_matches_the_mech_client_vector() -> None:
+    """Same inputs as mech-client's explicit-nonce vector give the same id."""
+    assert _vector_explicit_request_id().hex() == _EXPECTED_EXPLICIT_REQUEST_ID
+
+
+def test_explicit_domain_separator_matches_the_mech_vector() -> None:
+    """EIP712Domain("MechMarketplace", "2", chainId, marketplace), version hashed raw."""
+    domain = compute_explicit_nonce_domain_separator(_CHAIN_ID, _MARKETPLACE)
+    assert domain.hex() == _EXPECTED_EXPLICIT_DOMAIN
+    assert domain != compute_domain_separator(_CHAIN_ID, _MARKETPLACE)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"nonce": _VECTOR_NONCE + 1},
+        {"deadline": _VECTOR_DEADLINE + 1},
+        {"data": _VECTOR_DATA + b" "},
+        {"max_delivery_rate": _DELIVERY_RATE + 1},
+        {"requester": "0x" + "34" * 20},
+        {"mech_address": "0x" + "35" * 20},
+        {"payment_type": b"\x01" * 32},
+        {"domain_separator": b"\x5b" * 32},
+    ],
+)
+def test_every_explicit_request_id_input_is_committed(
+    override: Dict[str, Any],
+) -> None:
+    """Changing any single input changes the explicit request_id."""
+    assert _vector_explicit_request_id(**override).hex() != (
+        _EXPECTED_EXPLICIT_REQUEST_ID
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"payment_type": b"\x00"}, {"domain_separator": b"\x00" * 31}],
+)
+def test_explicit_request_id_rejects_wrong_lengths(override: Dict[str, Any]) -> None:
+    """A payment type or domain that is not 32 bytes is refused up front."""
+    with pytest.raises(ValueError):
+        _vector_explicit_request_id(**override)
 
 
 def test_canonical_bytes_match_the_facilitator_vector() -> None:
@@ -240,6 +327,13 @@ def _session_with(
     chain: str = _CHAIN,
     **kwargs: Any,
 ) -> Callable[[], requests.Session]:
+    """Build a session factory; sequential unless ``nonce_mode`` is passed.
+
+    Most tests here cover the slot bookkeeping, which only the sequential
+    path uses. The explicit default has its own tests at the end.
+    """
+    kwargs.setdefault("nonce_mode", NONCE_MODE_SEQUENTIAL)
+
     def _make() -> requests.Session:
         return mech_requests(
             account or Account.create(),
@@ -263,6 +357,14 @@ def _empty_slot_registry() -> Any:
     slot_registry().clear()
     yield
     slot_registry().clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_refusals() -> Any:
+    """Start every test with no explicit-nonce refusal remembered."""
+    explicit_nonce_refusals().clear()
+    yield
+    explicit_nonce_refusals().clear()
 
 
 def _patched_send(side_effect: Any):
@@ -1954,3 +2056,421 @@ def test_settlement_is_what_lets_a_slot_be_forgotten() -> None:
     # Both settled: the chain counter is now past them.
     assert registry.reserve(_CHAIN, _SAFE, 7, 7) == 7
     assert registry.live[(_CHAIN.lower(), _SAFE.lower())] == {7}
+
+
+# ---------------------------------------------------------------------------
+# Nonce modes: explicit by default, sequential when asked for or when the
+# facilitator turns an explicit request away.
+# ---------------------------------------------------------------------------
+
+_CHOSEN_NONCE = 2**255 + 12345
+_SERVER_DATE = "Wed, 01 Jan 2031 00:00:00 GMT"
+_SERVER_NOW = 1_924_992_000  # _SERVER_DATE in unix seconds
+_SEQUENTIAL_FIELDS = [
+    "request_id",
+    "safe_address",
+    "signature",
+    "nonce",
+    "expires_at",
+    "upstream",
+]
+_EXPLICIT_REFUSAL_BODY = {
+    "detail": "request_id does not match the derived value for this body"
+}
+
+
+def _default_session(account: Account, **kwargs: Any) -> requests.Session:
+    """A session built the way callers build one, with no nonce mode given."""
+    return mech_requests(
+        account,
+        safe_address=_SAFE,
+        chain=_CHAIN,
+        api=_API,
+        facilitator_base_url=_FACILITATOR,
+        **kwargs,
+    )
+
+
+def _upstream_data(body: Dict[str, Any]) -> bytes:
+    """The canonical bytes the facilitator re-derives from a posted body."""
+    return canonical_request_data(
+        method=body["upstream"]["method"],
+        path=body["upstream"]["path"],
+        query=body["upstream"]["query"],
+        body_b64=body["upstream"]["body_b64"],
+        expires_at=body["expires_at"],
+    )
+
+
+def _explicit_id_of(body: Dict[str, Any]) -> bytes:
+    """The ``getRequestIdWithNonce`` id for a posted explicit body."""
+    return derive_explicit_request_id(
+        domain_separator=compute_explicit_nonce_domain_separator(
+            _INFO_JSON["chain_id"], _INFO_JSON["marketplace_address"]
+        ),
+        mech_address=_INFO_JSON["mech_address"],
+        requester=_SAFE,
+        data=_upstream_data(body),
+        max_delivery_rate=_INFO_JSON["delivery_rates"][_API],
+        payment_type=bytes.fromhex(_INFO_JSON["payment_type"][2:]),
+        nonce=int(body["nonce"]),
+        deadline=body["deadline"],
+    )
+
+
+def _sequential_id_of(body: Dict[str, Any]) -> bytes:
+    """The ``getRequestId`` id for a posted sequential body."""
+    return derive_request_id(
+        marketplace_address=_INFO_JSON["marketplace_address"],
+        mech_address=_INFO_JSON["mech_address"],
+        requester=_SAFE,
+        data=_upstream_data(body),
+        delivery_rate=_INFO_JSON["delivery_rates"][_API],
+        payment_type=bytes.fromhex(_INFO_JSON["payment_type"][2:]),
+        nonce=int(body["nonce"]),
+        chain_id=_INFO_JSON["chain_id"],
+    )
+
+
+def _no_slot_taken() -> Any:
+    """Fail the test if anything reserves a slot from the Safe's counter."""
+    return patch.object(
+        mech_module, "reserve_slot", side_effect=AssertionError("slot reserved")
+    )
+
+
+def test_explicit_is_the_default_and_signs_a_chosen_nonce() -> None:
+    """No mode given: random nonce, typed-data id, deadline on the wire, no slot taken."""
+    account = Account.create()
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    fake.info_headers["Date"] = _SERVER_DATE
+    session = _default_session(account)
+
+    with _patched(fake), _no_slot_taken(), patch.object(
+        mech_module.secrets, "randbits", return_value=_CHOSEN_NONCE
+    ) as randbits:
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    randbits.assert_called_once_with(EXPLICIT_NONCE_BITS)
+    body = _posted_body(fake)
+    assert list(body) == _SEQUENTIAL_FIELDS + ["nonce_mode", "deadline"]
+    assert body["nonce_mode"] == NONCE_MODE_EXPLICIT
+    assert body["nonce"] == str(_CHOSEN_NONCE)
+    assert body["deadline"] == _SERVER_NOW + EXPLICIT_NONCE_DEADLINE_SECS
+    request_id = _explicit_id_of(body)
+    assert body["request_id"] == "0x" + request_id.hex()
+    assert body["request_id"] != "0x" + _sequential_id_of(body).hex()
+    digest = compute_safe_message_hash(request_id, _SAFE, _INFO_JSON["chain_id"])
+    recovered = Account._recover_hash(  # pylint: disable=no-value-for-parameter
+        digest, signature=bytes.fromhex(body["signature"][2:])
+    )
+    assert recovered == account.address
+    assert slot_registry().live == {}
+
+
+# The id an explicit request carries for ``_INFO_JSON`` at ``_SERVER_DATE``,
+# nonce ``_CHOSEN_NONCE`` and upstream body ``{"p": 1}``, as eth_account's
+# ``encode_typed_data`` hashes the same typed data.
+_EXPECTED_ADAPTER_EXPLICIT_REQUEST_ID = (
+    "37dfd4a479efbd3dcb0fa548107fa4173d040b0028bf35ef04c355009483b2bc"
+)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        _INFO_JSON,
+        {**_INFO_JSON, "explicit_mech_address": "0x000000000000000000000000000000000000cAfE"},
+    ],
+)
+def test_an_explicit_request_names_the_info_mech_in_its_id(
+    info: Dict[str, Any],
+) -> None:
+    """The id commits to ``mech_address``; any other mech field in the info is ignored."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    fake.info = dict(info)
+    fake.info_headers["Date"] = _SERVER_DATE
+    session = _default_session(Account.create())
+
+    with _patched(fake), patch.object(
+        mech_module.secrets, "randbits", return_value=_CHOSEN_NONCE
+    ):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    body = _posted_body(fake)
+    assert body["nonce_mode"] == NONCE_MODE_EXPLICIT
+    assert body["request_id"] == "0x" + _EXPECTED_ADAPTER_EXPLICIT_REQUEST_ID
+
+
+def test_every_explicit_request_gets_its_own_nonce() -> None:
+    """Two calls from one Safe never share a nonce, and neither holds a slot."""
+    fake = _FakeFacilitator(
+        [_response(200, _UPSTREAM_BODY), _response(200, _UPSTREAM_BODY)]
+    )
+    session = _default_session(Account.create())
+
+    with _patched(fake), _no_slot_taken():
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    first, second = _posted_body(fake, 0), _posted_body(fake, 1)
+    assert first["nonce"] != second["nonce"]
+    assert first["request_id"] != second["request_id"]
+    assert slot_registry().live == {}
+
+
+@pytest.mark.parametrize(
+    ("status", "refusal"),
+    [
+        (400, _EXPLICIT_REFUSAL_BODY),
+        (503, {"detail": EXPLICIT_NONCE_DISABLED_REASON}),
+        (503, {"detail": {"error": "x", "detail": EXPLICIT_NONCE_DISABLED_REASON}}),
+        (503, {"reason": EXPLICIT_NONCE_DISABLED_REASON}),
+    ],
+)
+def test_a_refused_explicit_request_is_resent_sequentially_and_later_calls_follow(
+    status: int, refusal: Dict[str, Any]
+) -> None:
+    """A sequential-only refusal falls back once and later calls follow it."""
+    fake = _FakeFacilitator(
+        [
+            _json_response(status, refusal),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    session = _default_session(Account.create())
+
+    with _patched(fake), patch.object(
+        mech_module.secrets, "randbits", return_value=_CHOSEN_NONCE
+    ) as randbits:
+        first = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        second = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 2})
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
+    randbits.assert_called_once_with(EXPLICIT_NONCE_BITS)
+    assert _posted_body(fake, 0)["nonce_mode"] == NONCE_MODE_EXPLICIT
+    resent, later = _posted_body(fake, 1), _posted_body(fake, 2)
+    for body in (resent, later):
+        assert list(body) == _SEQUENTIAL_FIELDS
+        assert body["request_id"] == "0x" + _sequential_id_of(body).hex()
+    assert (resent["nonce"], later["nonce"]) == ("7", "8")
+
+
+def test_a_remembered_refusal_lapses_and_explicit_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calls go sequential until the refusal lapses, then explicit is tried again."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    disabled = {"reason": EXPLICIT_NONCE_DISABLED_REASON}
+    fake = _FakeFacilitator(
+        [
+            _json_response(503, disabled),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    session = _default_session(Account.create())
+
+    with _patched(fake):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        clock["t"] += EXPLICIT_NONCE_RETRY_AFTER_SECS - 1
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 2})
+        clock["t"] += 1
+        third = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 3})
+
+    assert third.status_code == 200
+    modes = [_posted_body(fake, i).get("nonce_mode") for i in range(4)]
+    assert modes == [NONCE_MODE_EXPLICIT, None, None, NONCE_MODE_EXPLICIT]
+    assert not explicit_nonce_refusals().refused(_FACILITATOR, _CHAIN)
+
+
+def test_a_refusal_is_shared_by_every_session_for_that_facilitator() -> None:
+    """A second session in the same process goes sequential straight away."""
+    fake = _FakeFacilitator(
+        [
+            _json_response(503, {"reason": EXPLICIT_NONCE_DISABLED_REASON}),
+            _response(200, _UPSTREAM_BODY),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+
+    with _patched(fake):
+        _default_session(Account.create()).post(f"{_FACILITATOR}/x", json={"p": 1})
+        _default_session(Account.create()).post(f"{_FACILITATOR}/x", json={"p": 2})
+
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "POST", "GET", "POST"]
+    assert list(_posted_body(fake, 2)) == _SEQUENTIAL_FIELDS
+
+
+def test_a_refusal_is_remembered_per_facilitator_and_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the refusing (origin, chain) pair is held, and only for the window."""
+    clock = {"t": 50.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    refusals = ExplicitNonceRefusals(retry_after_secs=600.0)
+    refusals.record("https://F.example/", "Optimism")
+
+    assert refusals.refused("https://f.example", "optimism")
+    assert not refusals.refused("https://other.example", "optimism")
+    assert not refusals.refused("https://f.example", "base")
+    clock["t"] += 599.5
+    assert refusals.refused("https://f.example", "optimism")
+    clock["t"] += 0.5
+    assert not refusals.refused("https://f.example", "optimism")
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"detail": "request_id is malformed"}),
+        (400, {"detail": {"error": "invalid_nonce", "detail": "nonce exceeds"}}),
+        (401, {"detail": {"error": "invalid_signature", "detail": "bad sig"}}),
+        (409, {"detail": {"error": "nonce_mismatch", "detail": "x", "context": {}}}),
+        (503, {"detail": {"error": "settlement_paused", "detail": "held"}}),
+        (503, {"detail": _EXPLICIT_REFUSAL_BODY["detail"]}),
+        (503, {"detail": "explicit-nonce requests are disabled"}),
+        (400, {"detail": EXPLICIT_NONCE_DISABLED_REASON}),
+        (500, {"reason": EXPLICIT_NONCE_DISABLED_REASON, "detail": "boom"}),
+    ],
+)
+def test_any_other_refusal_of_an_explicit_request_is_raised_not_resent(
+    status: int, body: Any
+) -> None:
+    """Only the exact sequential-only refusal falls back; nothing else is retried."""
+    fake = _FakeFacilitator([_json_response(status, body)])
+    session = _default_session(Account.create())
+
+    with _patched(fake), _no_slot_taken(), pytest.raises(
+        MechRequestRejectedError
+    ) as excinfo:
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert excinfo.value.status_code == status
+    assert [c["method"] for c in fake.calls] == ["GET", "POST"]
+    assert not explicit_nonce_refusals().refused(_FACILITATOR, _CHAIN)
+
+
+def test_an_explicit_request_short_of_deposit_raises_the_typed_error() -> None:
+    """A 402 on the explicit path carries the shortfall, as on the sequential one."""
+    short = _json_response(
+        402,
+        {
+            "detail": {
+                "error": "insufficient_pre_deposit",
+                "detail": "top up",
+                "context": {"available": "2000", "required": "10000"},
+            }
+        },
+    )
+    fake = _FakeFacilitator([short])
+    session = _default_session(Account.create())
+
+    with _patched(fake), _no_slot_taken(), pytest.raises(
+        MechDepositRequiredError
+    ) as excinfo:
+        session.get(f"{_FACILITATOR}/x")
+
+    assert (excinfo.value.available, excinfo.value.required) == (2000, 10000)
+
+
+def test_an_explicit_request_waits_out_a_busy_safe_and_signs_afresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Busy is waited out on the explicit path too, with a new nonce and no slot."""
+    fake = _FakeFacilitator([_busy_response(), _response(200, _UPSTREAM_BODY)])
+    session = _default_session(Account.create())
+    slept: List[float] = []
+    monkeypatch.setattr(mech_module.time, "sleep", slept.append)
+
+    with _patched(fake), _no_slot_taken():
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert slept == [1.0]
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
+    first, second = _posted_body(fake, 0), _posted_body(fake, 1)
+    assert second["nonce_mode"] == NONCE_MODE_EXPLICIT
+    assert first["nonce"] != second["nonce"]
+
+
+def test_an_unresolved_explicit_body_is_replayed_wherever_the_counter_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit body holds no slot, so the counter never decides whether it is replayed."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    fake = _FakeFacilitator(
+        [requests.exceptions.ReadTimeout("slow"), _response(200, _UPSTREAM_BODY)]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _default_session(Account.create())
+
+    with _patched(fake), _no_slot_taken():
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        # A counter that moved on or not would decide a sequential body's fate.
+        fake.info = {**_INFO_JSON, "next_nonce": 3}
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert [c["method"] for c in fake.calls] == ["GET", "POST", "GET", "POST"]
+    assert _posted_body(fake, 0) == _posted_body(fake, 1)
+    assert slot_registry().live == {}
+
+
+def test_a_refused_replay_of_an_explicit_body_falls_back_like_a_fresh_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored explicit body turned away for its mode is not handed back as an answer."""
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(mech_module.time, "monotonic", lambda: clock["t"])
+    disabled = {"reason": EXPLICIT_NONCE_DISABLED_REASON}
+    fake = _FakeFacilitator(
+        [
+            requests.exceptions.ReadTimeout("slow"),
+            _json_response(503, disabled),
+            _json_response(503, disabled),
+            _response(200, _UPSTREAM_BODY),
+        ]
+    )
+    _deadline_fires_after_the_post(fake, clock)
+    session = _default_session(Account.create())
+
+    with _patched(fake):
+        with pytest.raises(MechDeadlineExceededError):
+            session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+        response = session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    assert response.status_code == 200
+    assert _posted_body(fake, 0) == _posted_body(fake, 1)
+    assert _posted_body(fake, 2)["nonce_mode"] == NONCE_MODE_EXPLICIT
+    assert list(_posted_body(fake, 3)) == _SEQUENTIAL_FIELDS
+
+
+def test_sequential_opt_in_sends_exactly_the_sequential_payload() -> None:
+    """Asked for sequential: the counter slot, the ``getRequestId`` id, no new fields."""
+    fake = _FakeFacilitator([_response(200, _UPSTREAM_BODY)])
+    session = _default_session(Account.create(), nonce_mode=NONCE_MODE_SEQUENTIAL)
+
+    with _patched(fake), patch.object(
+        mech_module.secrets, "randbits", side_effect=AssertionError("random nonce")
+    ):
+        session.post(f"{_FACILITATOR}/v1beta/models/x", json={"p": 1})
+
+    body = _posted_body(fake)
+    assert list(body) == _SEQUENTIAL_FIELDS
+    assert body["nonce"] == "7"
+    assert body["request_id"] == "0x" + _sequential_id_of(body).hex()
+
+
+@pytest.mark.parametrize("nonce_mode", ["Explicit", "", None, "random"])
+def test_an_unknown_nonce_mode_is_refused_at_construction(nonce_mode: Any) -> None:
+    """A misspelt mode fails loudly instead of silently picking one."""
+    with pytest.raises(ValueError, match="nonce_mode"):
+        _default_session(Account.create(), nonce_mode=nonce_mode)
