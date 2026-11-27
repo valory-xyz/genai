@@ -7,14 +7,14 @@ license: Apache-2.0
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint:
   __init__.py: bafybeihjhmzjok6icat7mvs7mtfrl5wrjc3dpyurtgzgwbvmcxiyfqolly
-  connection.py: bafybeia74utkswctirdrormmqyqmytidv4avhj76j5idep4yad2rkz6aga
+  connection.py: bafybeifz4cjwq3cxhnxynlmqkyldk53whnyl7pbgtb6fjyn4oeg7hjtq4q
   readme.md: bafybeie75rbyg3e3gr5uont6auovnsktfbwugafzoy43zpqhvuaotxqlbu
   tests/__init__.py: bafybeihe2ir2kxisz74cvq3b3ou2awfunkz46gu4lutdw77nvl5fpvs4rq
-  tests/test_connection.py: bafybeigc4dbqmtdsshs7f2idodib7iapwxebiawvtmnk7g3swsj3vjet7e
+  tests/test_connection.py: bafybeicijp3bhweeyuxhztpsvzf6euydh36667wji2ztfj3mioybvr6hmq
   utils.py: bafybeiedyknbiemm2jovy5cqwlhaxr5wm5ujtkxlabav6o7zke3njfpq4i
 fingerprint_ignore_patterns: []
 connections:
-- valory/x402:0.1.0:bafybeigxjthqr2qvghbv22djktbqsqo7n65wladqfsdffs2a5y4f3m4xu4
+- valory/x402:0.1.0:bafybeiaof4mhiohpod7d4djsub4ecb5qhutfr22vejvoamu3pll2xy4kvu
 protocols:
 - valory/srr:0.1.0:bafybeibfs6osw7guctdpollf4iwt4vhd6yk7ai34tqk5djuxtgowjwdjb4
 class_name: GenaiConnection
@@ -34,7 +34,7 @@ config:
     optimism: '0xcB55661502c8AB004Ab79C58974f1284d803b3Bf'
     base: '0x131876A3542D0945f57886C59BE3dF55D651c8d6'
   mech_facilitator_payment_types: {}
-  mech_delivery_rate_limit: null
+  mech_delivery_rate_limits: {}
 excluded_protocols: []
 restricted_to_protocols: []
 dependencies:

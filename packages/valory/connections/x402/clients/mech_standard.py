@@ -250,6 +250,13 @@ class MechLimitBelowMinimumError(PaymentError):
         self.minimum = minimum
 
 
+class MechStandardRouteUnavailableError(MechRequestRejectedError):
+    """The facilitator does not serve the standard route on this chain.
+
+    Nothing was accepted, so the same call may be sent by another route.
+    """
+
+
 class MechRequestFailedError(PaymentError):
     """The facilitator ran the request and it failed; it is charged all the same.
 
@@ -637,6 +644,11 @@ class MechStandardHTTPAdapter(
                 limit=self.delivery_rate_limit,
                 minimum=int(body.get("minimum_cap") or 0),
             )
+        if response.status_code == 404:
+            rejection = _rejection(response)
+            raise MechStandardRouteUnavailableError(
+                status_code=404, error=rejection.error, detail=rejection.detail
+            )
         raise _rejection(response)
 
     def _submit_explicit(
@@ -727,7 +739,8 @@ class MechStandardHTTPAdapter(
 
         :raises MechRequestFailedError: for a delivered failure.
         :raises MechRequestRejectedError: when nothing was delivered.
-        :raises MechDeadlineExceededError: when the answer is still pending.
+        :raises MechDeadlineExceededError: when the answer is still pending,
+            or the facilitator kept answering 5xx, until the budget ran out.
         """
         url = f"{self.offchain_url}/fetch_offchain_info"
         params = {"request_id": str(request_id)}
@@ -743,6 +756,10 @@ class MechStandardHTTPAdapter(
                 continue
             if response.status_code == 429:
                 self._wait(deadline, _retry_after_secs(response))
+                continue
+            if response.status_code >= 500:
+                # Says nothing about an accepted request; ask again.
+                self._wait(deadline, self.poll_interval_secs)
                 continue
             if response.status_code != 200:
                 raise _rejection(response)

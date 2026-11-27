@@ -25,7 +25,7 @@
 import base64
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Optional, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qsl, urlsplit
 
@@ -47,12 +47,20 @@ from packages.valory.connections.x402.clients.base import (
 from packages.valory.connections.x402.clients.mech import MechDepositRequiredError
 
 
-def _make_stub_for_get_response(use_x402: bool = False) -> Any:
+def _make_stub_for_get_response(use_x402: bool = False, **overrides: Any) -> Any:
     """Build a minimal stub that satisfies ``_get_response``'s instance use."""
-    return SimpleNamespace(
+    stub = SimpleNamespace(
         use_x402=use_x402,
+        use_mech_facilitator=False,
+        mech_standard_route=False,
         logger=MagicMock(),
     )
+    for key, value in overrides.items():
+        setattr(stub, key, value)
+    stub._standard_route_configured = (
+        lambda: GenaiConnection._standard_route_configured(cast(GenaiConnection, stub))
+    )
+    return stub
 
 
 class TestGetResponsePayloadValidation:
@@ -157,7 +165,7 @@ class TestProcessX402RequestPaymentResponseHeader:
             mech_standard_route=False,
             mech_facilitator_mech_addresses={},
             mech_facilitator_payment_types={},
-            mech_delivery_rate_limit=None,
+            mech_delivery_rate_limits={},
             mech_facilitator_base_url="http://facilitator.example",
             mech_chain="optimism",
             mech_safe_addresses={"optimism": "0x" + "11" * 20},
@@ -169,6 +177,8 @@ class TestProcessX402RequestPaymentResponseHeader:
             ),
             _eoa_account=MagicMock(),  # the session factories are monkeypatched away
             _mech_session=None,
+            _standard_mech_session=None,
+            _standard_route_paused_until=0.0,
         )
         for key, value in overrides.items():
             setattr(stub, key, value)
@@ -180,6 +190,17 @@ class TestProcessX402RequestPaymentResponseHeader:
         )
         stub._standard_session = lambda chain, safe: GenaiConnection._standard_session(
             cast(GenaiConnection, stub), chain, safe
+        )
+        stub._standard_route_in_use = lambda: GenaiConnection._standard_route_in_use(
+            cast(GenaiConnection, stub)
+        )
+        stub._standard_route_configured = (
+            lambda: GenaiConnection._standard_route_configured(
+                cast(GenaiConnection, stub)
+            )
+        )
+        stub._post_paid = lambda url, body: GenaiConnection._post_paid(
+            cast(GenaiConnection, stub), url, body
         )
         return stub
 
@@ -729,11 +750,22 @@ _EOA_KEY = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
 _GEMINI_TEXT_ANSWER = '{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}'
 
 
+def _gemini_response(text: str) -> requests.Response:
+    """Return a 200 Gemini answer whose only part is ``text``."""
+    response = requests.Response()
+    response.status_code = 200
+    response._content = json.dumps(
+        {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+    ).encode("utf-8")
+    return response
+
+
 class _StandardFacilitator:
     """Answers the two standard-route calls; records every posted form."""
 
-    def __init__(self) -> None:
+    def __init__(self, send_status: int = 200) -> None:
         self.forms: List[Dict[str, str]] = []
+        self.send_status = send_status
 
     def send(self, request: requests.PreparedRequest) -> requests.Response:
         parts = urlsplit(str(request.url))
@@ -744,7 +776,12 @@ class _StandardFacilitator:
             text = body.decode() if isinstance(body, bytes) else str(body)
             form = dict(parse_qsl(text))
             self.forms.append(form)
-            payload: Dict[str, Any] = {"request_id": form["request_id"]}
+            response.status_code = self.send_status
+            payload: Dict[str, Any] = (
+                {"request_id": form["request_id"]}
+                if self.send_status == 200
+                else {"status": "rejected", "reason": "not served"}
+            )
         else:
             request_id = dict(parse_qsl(parts.query))["request_id"]
             payload = {
@@ -810,7 +847,7 @@ class TestStandardMechRoute:
         fake = _StandardFacilitator()
         other_mech = "0x" + "99" * 20
         stub = self._stub(
-            mech_delivery_rate_limit=20000,
+            mech_delivery_rate_limits={"optimism": 20000},
             mech_facilitator_mech_addresses={"Optimism": other_mech},
             mech_facilitator_payment_types={
                 "optimism": "0x" + mech_standard.PAYMENT_TYPE_USDC.hex()
@@ -819,14 +856,17 @@ class TestStandardMechRoute:
 
         self._run(stub, fake)
 
-        adapter = stub._mech_session.adapters["https://"]
+        adapter = stub._standard_mech_session.adapters["https://"]
         assert adapter.mech_address.lower() == other_mech
         assert fake.forms[0]["delivery_rate"] == "20000"
 
     @pytest.mark.parametrize(
         "overrides,match",
         [
-            ({"mech_delivery_rate_limit": 1}, "below the facilitator's minimum"),
+            (
+                {"mech_delivery_rate_limits": {"optimism": 1}},
+                "below the facilitator's minimum",
+            ),
             (
                 {"mech_facilitator_mech_addresses": {"optimism": "0x" + "99" * 20}},
                 "payment type must be configured",
@@ -846,10 +886,118 @@ class TestStandardMechRoute:
         with pytest.raises(PaymentError, match=match):
             stub._paid_session_and_base_url()
 
-    def test_standard_route_does_not_need_the_legacy_rate_cap(self) -> None:
-        """``mech_max_delivery_rate`` belongs to /mech/chat and is not warned about here."""
+    def test_standard_route_without_the_legacy_cap_warns_about_the_fallback(
+        self,
+    ) -> None:
+        """The /mech/chat fallback needs ``mech_max_delivery_rate``, so its absence is named."""
         logger = MagicMock()
 
         genai_connection._check_payment_flags(logger, True, True, None, True)
 
-        logger.warning.assert_not_called()
+        (call,) = logger.warning.call_args_list
+        assert "does not serve the standard route" in call.args[0]
+
+    def test_limit_is_read_for_the_configured_chain_only(self) -> None:
+        """A limit sized for another chain's asset is not signed on this one."""
+        fake = _StandardFacilitator()
+        stub = self._stub(mech_delivery_rate_limits={"gnosis": 30000000000000000})
+
+        self._run(stub, fake)
+
+        assert fake.forms[0]["delivery_rate"] == "30000"
+
+    def test_unserved_standard_route_falls_back_to_mech_chat(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 404 on the send goes by /mech/chat, which is kept until the retry window ends."""
+        fake = _StandardFacilitator(send_status=404)
+        legacy = MagicMock()
+        legacy.post.return_value = _gemini_response("legacy")
+        monkeypatch.setattr(genai_connection, "mech_requests", lambda *_a, **_k: legacy)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(genai_connection.time, "monotonic", lambda: clock["now"])
+        stub = self._stub(mech_max_delivery_rate=12000)
+
+        assert self._run(stub, fake) == ("legacy", False)
+        assert self._run(stub, fake) == ("legacy", False)
+        assert len(fake.forms) == 1 and legacy.post.call_count == 2
+
+        clock["now"] += genai_connection.STANDARD_ROUTE_RETRY_SECS
+        fake.send_status = 200
+        assert self._run(stub, fake) == ("hello", False)
+        assert len(fake.forms) == 2 and legacy.post.call_count == 2
+
+    def test_other_send_refusal_does_not_fall_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a 404 means the route is not served; other refusals are raised as is."""
+        fake = _StandardFacilitator(send_status=400)
+        monkeypatch.setattr(
+            genai_connection,
+            "mech_requests",
+            lambda *_a, **_k: pytest.fail("/mech/chat must not be used"),
+        )
+
+        with pytest.raises(mech_standard.MechRequestRejectedError):
+            self._run(self._stub(mech_max_delivery_rate=12000), fake)
+
+    @pytest.mark.parametrize(
+        "standard_route,model,code",
+        [
+            (True, "gemini-2.5-pro", "mech_model_not_served"),
+            (True, "gemini-2.0-flash-lite", "mech_model_not_served"),
+            (True, "gemini-2.5-flash-lite", None),
+            (False, "gemini-2.5-pro", None),
+        ],
+    )
+    def test_models_the_standard_tool_does_not_serve_are_refused_unsigned(
+        self, standard_route: bool, model: str, code: Optional[str]
+    ) -> None:
+        """A model the chat tool refuses fails before anything is signed."""
+        stub = _make_stub_for_get_response(
+            use_x402=True, use_mech_facilitator=True, mech_standard_route=standard_route
+        )
+        stub._process_x402_request = MagicMock(return_value=("ok", False))
+
+        body, error = GenaiConnection._get_response(
+            stub, json.dumps({"prompt": "x", "model": model})
+        )
+
+        assert body.get("code") == code
+        assert error is (code is not None)
+        assert stub._process_x402_request.called is (code is None)
+
+
+class TestStandardMechErrorCodes:
+    """Typed mech errors reach the skill with a ``code`` it can branch on."""
+
+    @pytest.mark.parametrize(
+        "exc,code,context",
+        [
+            (
+                mech_standard.MechLimitBelowMinimumError(limit=1, minimum=15000),
+                "mech_limit_below_minimum",
+                {"limit": 1, "minimum": 15000},
+            ),
+            (
+                mech_standard.MechRequestFailedError(
+                    request_id=7, fault="client", error="bad", delivery_rate=30000
+                ),
+                "mech_request_failed",
+                {"request_id": 7, "fault": "client", "delivery_rate": 30000},
+            ),
+            (PaymentError("other"), None, None),
+        ],
+    )
+    def test_payment_errors_carry_their_code_and_context(
+        self, exc: Exception, code: Optional[str], context: Optional[Dict[str, Any]]
+    ) -> None:
+        """Each typed error maps to its code; any other payment error has none."""
+        stub = _make_stub_for_get_response(use_x402=True)
+        stub._process_x402_request = MagicMock(side_effect=exc)
+
+        body, error = GenaiConnection._get_response(stub, '{"prompt": "x"}')
+
+        assert error is True
+        assert body.get("code") == code
+        assert body.get("context") == context

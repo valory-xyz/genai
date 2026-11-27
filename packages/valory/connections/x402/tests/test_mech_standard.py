@@ -56,6 +56,7 @@ from packages.valory.connections.x402.clients.mech_standard import (
     REASON_NONCE_BELOW,
     MechLimitBelowMinimumError,
     MechRequestFailedError,
+    MechStandardRouteUnavailableError,
     default_limit,
     mech_standard_requests,
     minimum_limit,
@@ -484,6 +485,46 @@ def test_poll_survives_a_dropped_connection(
     assert sleeps == [2.0]
 
 
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_poll_asks_again_after_a_server_error(
+    facilitator: _Facilitator, sleeps: List[float], status: int
+) -> None:
+    """A 5xx on the poll says nothing about the request, so the same id is asked again."""
+    facilitator.poll_script = [_resp(status, {}), None]
+    assert _chat(_session()).text == _GEMINI_ANSWER
+    assert len(facilitator.forms) == 1
+    assert len(facilitator.polls) == 2
+    assert sleeps == [2.0]
+
+
+def test_poll_server_errors_keep_the_form_for_the_next_identical_call(
+    facilitator: _Facilitator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5xx until the budget ends is an unknown outcome; the next call re-sends, not re-signs."""
+    session = _session(total_deadline_secs=10.0)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(std.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(std.time, "sleep", lambda secs: clock.update(now=clock["now"] + secs))
+    facilitator.poll_script = [_resp(503, {})] * 10
+    with pytest.raises(MechOutcomeUnknownError):
+        _chat(session)
+    facilitator.poll_script = []
+    response = _chat(session)
+    first, second = facilitator.forms
+    assert first == second
+    assert response.headers["X-Mech-Request-Id"] == first["request_id"]
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_poll_client_error_is_a_rejection(
+    facilitator: _Facilitator, status: int
+) -> None:
+    """A 4xx on the poll is a definite answer and is raised."""
+    facilitator.poll_script = [_resp(status, {"reason": "unknown request"})]
+    with pytest.raises(MechRequestRejectedError, match="unknown request"):
+        _chat(_session())
+
+
 @pytest.mark.parametrize("fault", ["client", "mech"])
 def test_failed_result_names_who_caused_it(
     facilitator: _Facilitator, fault: str
@@ -583,6 +624,20 @@ def test_other_refusal_is_raised_with_its_reason(facilitator: _Facilitator) -> N
     ]
     with pytest.raises(MechRequestRejectedError, match="not served"):
         _chat(_session())
+
+
+@pytest.mark.parametrize(
+    "status,typed", [(404, True), (400, False), (401, False)]
+)
+def test_only_a_404_on_send_means_the_route_is_not_served(
+    facilitator: _Facilitator, status: int, typed: bool
+) -> None:
+    """A 404 is typed so the caller can use another route; other refusals are not."""
+    facilitator.post_script = [_resp(status, {"status": "rejected", "reason": "no"})]
+    with pytest.raises(MechRequestRejectedError) as info:
+        _chat(_session())
+    assert isinstance(info.value, MechStandardRouteUnavailableError) is typed
+    assert info.value.status_code == status
 
 
 def test_rate_limit_waits_and_resends_the_same_form(
